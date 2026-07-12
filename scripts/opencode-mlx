@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/opencode-mlx <target> [opencode args...]
+
+Targets:
+  primary         Qwen3 Coder Next 8-bit as the normal opencode Build/tool agent
+  qwen            Qwen Coder Next 4-bit as the fast fallback Build/tool agent
+  qwen-chat       Qwen Coder Next 4-bit as chat-only
+  qwen30          Qwen3 Coder 30B 8-bit as the normal opencode Build/tool agent
+  qwen30-chat     Qwen3 Coder 30B 8-bit as chat-only
+  qwen-coder-next8 Qwen3 Coder Next 8-bit as the normal opencode Build/tool agent
+  qwen-coder-next8-chat Qwen3 Coder Next 8-bit as chat-only
+  qwen-next80     Qwen3 Next 80B A3B 8-bit as chat-only
+  glm             GLM 4.5 Air as chat-only
+  gemma           Gemma 4 31B as chat-only
+  deepseek        DeepSeek R1 Distill Qwen 32B 4-bit as chat-only
+  deepseek8       DeepSeek R1 Distill Qwen 32B 8-bit as chat-only
+  qwen-oblit      Qwen3.6 27B Obliterated as chat-only
+  models          List configured MLX models
+
+Examples:
+  scripts/opencode-mlx primary
+  scripts/opencode-mlx qwen
+  scripts/opencode-mlx qwen30
+  scripts/opencode-mlx qwen-coder-next8
+  scripts/opencode-mlx qwen-next80
+  scripts/opencode-mlx glm
+  scripts/opencode-mlx deepseek --continue
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 2
+fi
+
+target="$1"
+shift
+
+case "$target" in
+  primary)
+    exec opencode -m local-mlx/qwen3-coder-next-8bit "$@"
+    ;;
+  gemma|gemma-chat)
+    exec opencode --agent gemma-chat "$@"
+    ;;
+  qwen|qwen-build|build)
+    exec opencode -m local-mlx/qwen3-coder-next "$@"
+    ;;
+  qwen-chat)
+    exec opencode --agent qwen-chat "$@"
+    ;;
+  qwen30|qwen30-build|qwen-30b|qwen-30b-build)
+    exec opencode -m local-mlx/qwen3-coder-30b-8bit "$@"
+    ;;
+  qwen30-chat|qwen-30b-chat)
+    exec opencode --agent qwen30-chat "$@"
+    ;;
+  qwen-coder-next8|qwen-coder-next8-build|qwen3-coder-next-8bit|qwen3-coder-next-8bit-build)
+    exec opencode -m local-mlx/qwen3-coder-next-8bit "$@"
+    ;;
+  qwen-coder-next8-chat|qwen3-coder-next-8bit-chat)
+    exec opencode --agent qwen-coder-next8-chat "$@"
+    ;;
+  qwen-next80|qwen-next80-chat|qwen3-next-80b|qwen3-next-80b-chat)
+    exec opencode --agent qwen-next80-chat "$@"
+    ;;
+  glm|glm-chat)
+    exec opencode --agent glm-chat "$@"
+    ;;
+  deepseek|deepseek-chat|deepseek4)
+    exec opencode --agent deepseek-chat "$@"
+    ;;
+  deepseek8|deepseek8-chat|deepseek-8bit)
+    exec opencode --agent deepseek8-chat "$@"
+    ;;
+  qwen-oblit|qwen-oblit-chat)
+    exec opencode --agent qwen-oblit-chat "$@"
+    ;;
+  models|list)
+    exec "$(dirname "$0")/mlx-server" models
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Unknown target: $target" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

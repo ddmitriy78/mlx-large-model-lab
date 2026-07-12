@@ -1,0 +1,300 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local-mlx/qwen3-coder-next-8bit",
+  "small_model": "local-mlx/qwen3-coder-next",
+  "agent": {
+    "qwen-chat": {
+      "description": "Chat-only Qwen Coder without opencode tool access.",
+      "model": "local-mlx/qwen3-coder-next",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "qwen30-chat": {
+      "description": "Chat-only Qwen3 Coder 30B 8-bit without opencode tool access.",
+      "model": "local-mlx/qwen3-coder-30b-8bit",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "qwen-coder-next8-chat": {
+      "description": "Chat-only Qwen3 Coder Next 8-bit without opencode tool access.",
+      "model": "local-mlx/qwen3-coder-next-8bit",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "qwen-next80-chat": {
+      "description": "Chat-only Qwen3 Next 80B A3B 8-bit without opencode tool access.",
+      "model": "local-mlx/qwen3-next-80b-8bit",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "glm-chat": {
+      "description": "Chat-only GLM agent without opencode tool access.",
+      "model": "local-mlx/glm-4-5-air",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "gemma-chat": {
+      "description": "Chat-only Gemma agent without opencode tool access.",
+      "model": "local-mlx/gemma-4-31b-it-optiq",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "deepseek-chat": {
+      "description": "Chat-only DeepSeek R1 Distill Qwen 32B 4-bit agent without opencode tool access.",
+      "model": "local-mlx/deepseek-r1-qwen-32b",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "deepseek8-chat": {
+      "description": "Chat-only DeepSeek R1 Distill Qwen 32B 8-bit agent without opencode tool access.",
+      "model": "local-mlx/deepseek-r1-qwen-32b-8bit",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "qwen-oblit-chat": {
+      "description": "Chat-only Qwen3.6 27B Obliterated agent without opencode tool access.",
+      "model": "local-mlx/qwen3-6-27b-obliterated",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools.",
+      "tools": {
+        "invalid": false,
+        "question": false,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    }
+  },
+  "provider": {
+    "local-mlx": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local MLX",
+      "options": {
+        "baseURL": "http://127.0.0.1:48080/v1",
+        "apiKey": "local-mlx",
+        "timeout": 1800000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "qwen3-coder-next": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Coder-Next-4bit",
+          "name": "Qwen3 Coder Next 4-bit MLX",
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "qwen3-coder-30b-8bit": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Coder-30B-A3B-Instruct-8bit",
+          "name": "Qwen3 Coder 30B A3B Instruct 8-bit MLX",
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "qwen3-coder-next-8bit": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Coder-Next-8bit",
+          "name": "Qwen3 Coder Next 8-bit MLX",
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "qwen3-next-80b-8bit": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Next-80B-A3B-Instruct-8bit",
+          "name": "Qwen3 Next 80B A3B Instruct 8-bit MLX",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "gemma-4-31b-it-optiq": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/gemma-4-31B-it-OptiQ-4bit",
+          "name": "Gemma 4 31B IT OptiQ 4-bit MLX",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "qwen3-6-27b-obliterated": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3.6-27B-OBLITERATED-MLX-4bit",
+          "name": "Qwen3.6 27B Obliterated 4-bit MLX",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "deepseek-r1-qwen-32b": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/DeepSeek-R1-Distill-Qwen-32B-4bit",
+          "name": "DeepSeek R1 Distill Qwen 32B 4-bit MLX",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "deepseek-r1-qwen-32b-8bit": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/DeepSeek-R1-Distill-Qwen-32B-MLX-8Bit",
+          "name": "DeepSeek R1 Distill Qwen 32B 8-bit MLX",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        },
+        "glm-4-5-air": {
+          "id": "/Users/dima/AI_ML/mlx_01/models/GLM-4.5-Air-4bit",
+          "name": "GLM 4.5 Air 4-bit MLX",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}

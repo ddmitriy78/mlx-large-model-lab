@@ -1,0 +1,18 @@
+.venv/
+.python-version
+__pycache__/
+*.py[cod]
+
+# Large local assets and generated experiment output.
+models/
+.hf-cache/
+runs/
+adapters/
+prompt-caches/
+logs/
+*.safetensors
+
+# Local OS/editor files.
+.DS_Store
+.idea/
+.vscode/

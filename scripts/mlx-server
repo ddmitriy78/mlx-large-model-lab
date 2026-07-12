@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_PATH="$ROOT_DIR/configs/models.json"
+DEFAULT_MODEL_ALIAS="qwen3_coder_next_8bit"
+MODEL_INPUT="${MLX_SERVER_MODEL:-$DEFAULT_MODEL_ALIAS}"
+COMMAND="${1:-}"
+if [[ $# -ge 2 ]]; then
+  case "$COMMAND" in
+    start|serve|restart|load|switch|command|test)
+      MODEL_INPUT="$2"
+      ;;
+  esac
+fi
+HOST="${MLX_SERVER_HOST:-127.0.0.1}"
+PORT="${MLX_SERVER_PORT:-48080}"
+START_TIMEOUT="${MLX_SERVER_START_TIMEOUT:-300}"
+LOG_DIR="$ROOT_DIR/logs"
+PID_FILE="$LOG_DIR/mlx-server.pid"
+LOG_FILE="$LOG_DIR/mlx-server.log"
+SERVER_URL="http://$HOST:$PORT/v1/models"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+SERVER_MODULE="mlx_lab.mlx_server"
+
+resolve_model_ref() {
+  python3 - "$ROOT_DIR" "$CONFIG_PATH" "$MODEL_INPUT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+config_path = Path(sys.argv[2])
+model_input = sys.argv[3]
+
+if model_input.startswith("/"):
+    print(model_input)
+    raise SystemExit
+
+if model_input.startswith("models/"):
+    print(root / model_input)
+    raise SystemExit
+
+with config_path.open("r", encoding="utf-8") as file:
+    config = json.load(file)
+
+models = config.get("models", {})
+for key, model in models.items():
+    candidates = {key, Path(model["local_dir"]).name, model["repo_id"]}
+    candidates.update(model.get("aliases", []))
+    if model_input in candidates:
+        local = root / model["local_dir"]
+        if (local / "config.json").exists() and any(local.glob("*.safetensors")):
+            print(local)
+        else:
+            print(model["repo_id"])
+        raise SystemExit
+
+print(model_input)
+PY
+}
+
+MODEL_REF="$(resolve_model_ref)"
+
+usage() {
+  cat <<EOF
+Usage: scripts/mlx-server <command>
+
+Commands:
+  start       Start the MLX model server in the background
+  load MODEL  Restart the server with MODEL loaded into memory
+  switch MODEL
+              Alias for load
+  serve       Run the MLX model server in the foreground
+  stop        Stop the background MLX model server
+  unload      Alias for stop; unloads model weights from memory
+  restart     Stop and start the server
+  current     Show server status and the loaded model process command
+  status      Show whether the server is responding
+  logs        Tail server logs
+  test        Send a small chat completion request
+  command     Print the raw server command
+  models      List configured model aliases
+  list        Alias for models
+
+Environment:
+  MLX_SERVER_MODEL Default: qwen3_coder_next_8bit
+  MLX_SERVER_HOST  Default: 127.0.0.1
+  MLX_SERVER_PORT  Default: 48080
+  MLX_SERVER_MODEL_LIST configured|runtime (default: configured)
+  MLX_SERVER_ADVERTISE_UNDOWNLOADED 1 to include configured hosted refs
+EOF
+}
+
+ensure_model() {
+  if [[ "$MODEL_REF" = /* ]] && { [[ ! -f "$MODEL_REF/config.json" ]] || ! compgen -G "$MODEL_REF/*.safetensors" >/dev/null; }; then
+    echo "Model is not downloaded at $MODEL_REF" >&2
+    echo "Use a configured alias for a hosted model, a Hugging Face repo id, or a downloaded model directory." >&2
+    exit 1
+  fi
+}
+
+is_pid_running() {
+  [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+is_http_ready() {
+  curl -fsS "$SERVER_URL" >/dev/null 2>&1
+}
+
+listener_pids() {
+  lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true
+}
+
+run_server() {
+  if [[ -x "$PYTHON_BIN" ]]; then
+    exec "$PYTHON_BIN" -m "$SERVER_MODULE" \
+      --model "$MODEL_REF" \
+      --host "$HOST" \
+      --port "$PORT"
+  fi
+
+  exec uv run python -m "$SERVER_MODULE" \
+    --model "$MODEL_REF" \
+    --host "$HOST" \
+    --port "$PORT"
+}
+
+launch_server_background() {
+  mkdir -p "$LOG_DIR"
+
+  python3 - "$ROOT_DIR" "$LOG_FILE" "$PID_FILE" "$PYTHON_BIN" "$SERVER_MODULE" "$MODEL_REF" "$HOST" "$PORT" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+root, log_path, pid_path, python_bin, server_module, model_ref, host, port = sys.argv[1:]
+if os.path.isfile(python_bin) and os.access(python_bin, os.X_OK):
+    command = [
+        python_bin,
+        "-m",
+        server_module,
+        "--model",
+        model_ref,
+        "--host",
+        host,
+        "--port",
+        port,
+    ]
+else:
+    command = [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        server_module,
+        "--model",
+        model_ref,
+        "--host",
+        host,
+        "--port",
+        port,
+    ]
+
+with open(os.devnull, "rb") as stdin, open(log_path, "ab", buffering=0) as log:
+    process = subprocess.Popen(
+        command,
+        cwd=root,
+        stdin=stdin,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+Path(pid_path).write_text(f"{process.pid}\n", encoding="utf-8")
+PY
+}
+
+server_command() {
+  if [[ -x "$PYTHON_BIN" ]]; then
+    cat <<EOF
+cd "$ROOT_DIR" && "$PYTHON_BIN" -m "$SERVER_MODULE" \\
+  --model "$MODEL_REF" \\
+  --host "$HOST" \\
+  --port "$PORT"
+EOF
+    return
+  fi
+
+  cat <<EOF
+cd "$ROOT_DIR" && uv run python -m "$SERVER_MODULE" \\
+  --model "$MODEL_REF" \\
+  --host "$HOST" \\
+  --port "$PORT"
+EOF
+}
+
+start_server() {
+  ensure_model
+  mkdir -p "$LOG_DIR"
+
+  if is_http_ready; then
+    echo "MLX server is already responding at http://$HOST:$PORT"
+    return
+  fi
+
+  if is_pid_running; then
+    echo "PID $(cat "$PID_FILE") exists but HTTP is not ready yet."
+    echo "Logs: $LOG_FILE"
+    return
+  fi
+
+  local pids
+  pids="$(listener_pids)"
+  if [[ -n "$pids" ]]; then
+    echo "Port $PORT is already held by process(es): $pids" >&2
+    echo "Run scripts/mlx-server unload, then start again." >&2
+    exit 1
+  fi
+
+  echo "Starting MLX server at http://$HOST:$PORT"
+  echo "Model: $MODEL_REF"
+  launch_server_background
+  echo "PID: $(cat "$PID_FILE")"
+  echo "Logs: $LOG_FILE"
+
+  for ((i = 0; i < START_TIMEOUT; i++)); do
+    if is_http_ready; then
+      echo "MLX server is ready."
+      return
+    fi
+    sleep 1
+  done
+
+  echo "Server did not become ready within $START_TIMEOUT seconds. Tail logs with: scripts/mlx-server logs" >&2
+  exit 1
+}
+
+stop_server() {
+  if is_pid_running; then
+    local pid
+    pid="$(cat "$PID_FILE")"
+    echo "Stopping MLX server PID $pid"
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$PID_FILE"
+        echo "Stopped."
+        return
+      fi
+      sleep 1
+    done
+    echo "PID $pid did not stop cleanly; forcing."
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"
+  fi
+
+  local pids
+  pids="$(listener_pids)"
+  if [[ -n "$pids" ]]; then
+    echo "Stopping MLX server listener process(es) on port $PORT: $pids"
+    kill $pids 2>/dev/null || true
+    rm -f "$PID_FILE"
+    return
+  fi
+
+  echo "No MLX server PID found."
+}
+
+status_server() {
+  if is_http_ready; then
+    echo "HTTP ready: http://$HOST:$PORT"
+  else
+    echo "HTTP not ready: http://$HOST:$PORT"
+  fi
+
+  if is_pid_running; then
+    echo "Managed PID: $(cat "$PID_FILE")"
+  else
+    echo "Managed PID: none"
+  fi
+
+  local pids
+  pids="$(listener_pids)"
+  if [[ -n "$pids" ]]; then
+    echo "Listener PID(s) on port $PORT: $pids"
+  else
+    echo "Listener PID(s) on port $PORT: none"
+  fi
+}
+
+current_server() {
+  status_server
+
+  local pid=""
+  if is_pid_running; then
+    pid="$(cat "$PID_FILE")"
+  else
+    pid="$(listener_pids | head -n 1)"
+  fi
+
+  if [[ -z "$pid" ]]; then
+    echo "Loaded model: none"
+    echo "Default model: $MODEL_REF"
+    return
+  fi
+
+  local command_line
+  command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  if [[ -z "$command_line" ]]; then
+    echo "Loaded model: unknown"
+    return
+  fi
+
+  python3 - "$command_line" <<'PY'
+import shlex
+import sys
+
+command = sys.argv[1]
+parts = shlex.split(command)
+model = "unknown"
+if "--model" in parts:
+    index = parts.index("--model")
+    if index + 1 < len(parts):
+        model = parts[index + 1]
+print(f"Loaded model: {model}")
+print(f"Command: {command}")
+PY
+}
+
+test_server() {
+  curl -fsS "http://$HOST:$PORT/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "'$MODEL_REF'",
+      "messages": [
+        {"role": "user", "content": "Reply exactly: local mlx server ok"}
+      ],
+      "max_tokens": 128,
+      "temperature": 0
+    }'
+  echo
+}
+
+list_models() {
+  python3 - "$ROOT_DIR" "$CONFIG_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+config_path = Path(sys.argv[2])
+
+with config_path.open("r", encoding="utf-8") as file:
+    config = json.load(file)
+
+for key, model in config.get("models", {}).items():
+    local = root / model["local_dir"]
+    downloaded = (local / "config.json").exists() and any(local.glob("*.safetensors"))
+    aliases = ", ".join(model.get("aliases", [])) or "-"
+    ref = str(local) if downloaded else model["repo_id"]
+    status = "local" if downloaded else "hosted"
+    print(f"{key}\t{status}\t{aliases}\t{ref}")
+PY
+}
+
+case "${1:-}" in
+  start)
+    start_server
+    ;;
+  load|switch)
+    if [[ $# -lt 2 ]]; then
+      echo "Usage: scripts/mlx-server $1 <model-alias-or-path>" >&2
+      exit 2
+    fi
+    stop_server
+    start_server
+    ;;
+  serve)
+    ensure_model
+    run_server
+    ;;
+  stop|unload)
+    stop_server
+    ;;
+  restart)
+    stop_server
+    start_server
+    ;;
+  current)
+    current_server
+    ;;
+  status)
+    status_server
+    ;;
+  logs)
+    mkdir -p "$LOG_DIR"
+    touch "$LOG_FILE"
+    tail -f "$LOG_FILE"
+    ;;
+  test)
+    test_server
+    ;;
+  command)
+    server_command
+    ;;
+  models|list)
+    list_models
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
