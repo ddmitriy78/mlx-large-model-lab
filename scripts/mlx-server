@@ -19,9 +19,14 @@ START_TIMEOUT="${MLX_SERVER_START_TIMEOUT:-300}"
 LOG_DIR="$ROOT_DIR/logs"
 PID_FILE="$LOG_DIR/mlx-server.pid"
 LOG_FILE="$LOG_DIR/mlx-server.log"
+RUNTIME_STATE_FILE="${MLX_SERVER_RUNTIME_STATE:-$LOG_DIR/mlx-server-runtime.json}"
 SERVER_URL="http://$HOST:$PORT/v1/models"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 SERVER_MODULE="mlx_lab.mlx_server"
+PROMPT_CACHE_SIZE="${MLX_SERVER_PROMPT_CACHE_SIZE:-4}"
+PROMPT_CACHE_BYTES="${MLX_SERVER_PROMPT_CACHE_BYTES:-8GB}"
+export MLX_SERVER_RUNTIME_STATE="$RUNTIME_STATE_FILE"
+export MLX_SERVER_PIN_MODEL="${MLX_SERVER_PIN_MODEL:-1}"
 
 resolve_model_ref() {
   python3 - "$ROOT_DIR" "$CONFIG_PATH" "$MODEL_INPUT" <<'PY'
@@ -89,6 +94,14 @@ Environment:
   MLX_SERVER_PORT  Default: 48080
   MLX_SERVER_MODEL_LIST configured|runtime (default: configured)
   MLX_SERVER_ADVERTISE_UNDOWNLOADED 1 to include configured hosted refs
+  MLX_SERVER_PIN_MODEL 1 pins requests to the explicitly loaded model (default)
+  MLX_SERVER_PROMPT_CACHE_SIZE Maximum retained KV cache entries (default: 4)
+  MLX_SERVER_PROMPT_CACHE_BYTES Maximum retained KV cache bytes (default: 8GB)
+  MLX_SERVER_MEMORY_GUARD 1 enables admission and emergency cancellation (default)
+  MLX_SERVER_MAX_CONTEXT_TOKENS Combined prompt/output context cap (default: 128000)
+  MLX_SERVER_MAX_OUTPUT_TOKENS Per-request output cap (default: 32000)
+  MLX_SERVER_MEMORY_RESERVE_BYTES Admission memory reserve (default: 16GB)
+  MLX_SERVER_MEMORY_ABORT_BYTES Emergency cancellation threshold (default: 8GB)
 EOF
 }
 
@@ -117,25 +130,40 @@ run_server() {
     exec "$PYTHON_BIN" -m "$SERVER_MODULE" \
       --model "$MODEL_REF" \
       --host "$HOST" \
-      --port "$PORT"
+      --port "$PORT" \
+      --prompt-cache-size "$PROMPT_CACHE_SIZE" \
+      --prompt-cache-bytes "$PROMPT_CACHE_BYTES"
   fi
 
   exec uv run python -m "$SERVER_MODULE" \
     --model "$MODEL_REF" \
     --host "$HOST" \
-    --port "$PORT"
+    --port "$PORT" \
+    --prompt-cache-size "$PROMPT_CACHE_SIZE" \
+    --prompt-cache-bytes "$PROMPT_CACHE_BYTES"
 }
 
 launch_server_background() {
   mkdir -p "$LOG_DIR"
 
-  python3 - "$ROOT_DIR" "$LOG_FILE" "$PID_FILE" "$PYTHON_BIN" "$SERVER_MODULE" "$MODEL_REF" "$HOST" "$PORT" <<'PY'
+  python3 - "$ROOT_DIR" "$LOG_FILE" "$PID_FILE" "$PYTHON_BIN" "$SERVER_MODULE" "$MODEL_REF" "$HOST" "$PORT" "$PROMPT_CACHE_SIZE" "$PROMPT_CACHE_BYTES" <<'PY'
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-root, log_path, pid_path, python_bin, server_module, model_ref, host, port = sys.argv[1:]
+(
+    root,
+    log_path,
+    pid_path,
+    python_bin,
+    server_module,
+    model_ref,
+    host,
+    port,
+    prompt_cache_size,
+    prompt_cache_bytes,
+) = sys.argv[1:]
 if os.path.isfile(python_bin) and os.access(python_bin, os.X_OK):
     command = [
         python_bin,
@@ -147,6 +175,10 @@ if os.path.isfile(python_bin) and os.access(python_bin, os.X_OK):
         host,
         "--port",
         port,
+        "--prompt-cache-size",
+        prompt_cache_size,
+        "--prompt-cache-bytes",
+        prompt_cache_bytes,
     ]
 else:
     command = [
@@ -161,6 +193,10 @@ else:
         host,
         "--port",
         port,
+        "--prompt-cache-size",
+        prompt_cache_size,
+        "--prompt-cache-bytes",
+        prompt_cache_bytes,
     ]
 
 with open(os.devnull, "rb") as stdin, open(log_path, "ab", buffering=0) as log:
@@ -183,7 +219,9 @@ server_command() {
 cd "$ROOT_DIR" && "$PYTHON_BIN" -m "$SERVER_MODULE" \\
   --model "$MODEL_REF" \\
   --host "$HOST" \\
-  --port "$PORT"
+  --port "$PORT" \\
+  --prompt-cache-size "$PROMPT_CACHE_SIZE" \\
+  --prompt-cache-bytes "$PROMPT_CACHE_BYTES"
 EOF
     return
   fi
@@ -192,7 +230,9 @@ EOF
 cd "$ROOT_DIR" && uv run python -m "$SERVER_MODULE" \\
   --model "$MODEL_REF" \\
   --host "$HOST" \\
-  --port "$PORT"
+  --port "$PORT" \\
+  --prompt-cache-size "$PROMPT_CACHE_SIZE" \\
+  --prompt-cache-bytes "$PROMPT_CACHE_BYTES"
 EOF
 }
 
@@ -246,6 +286,7 @@ stop_server() {
     for _ in {1..20}; do
       if ! kill -0 "$pid" 2>/dev/null; then
         rm -f "$PID_FILE"
+        rm -f "$RUNTIME_STATE_FILE"
         echo "Stopped."
         return
       fi
@@ -254,6 +295,7 @@ stop_server() {
     echo "PID $pid did not stop cleanly; forcing."
     kill -9 "$pid" 2>/dev/null || true
     rm -f "$PID_FILE"
+    rm -f "$RUNTIME_STATE_FILE"
   fi
 
   local pids
@@ -262,6 +304,7 @@ stop_server() {
     echo "Stopping MLX server listener process(es) on port $PORT: $pids"
     kill $pids 2>/dev/null || true
     rm -f "$PID_FILE"
+    rm -f "$RUNTIME_STATE_FILE"
     return
   fi
 
@@ -313,18 +356,41 @@ current_server() {
     return
   fi
 
-  python3 - "$command_line" <<'PY'
+  python3 - "$command_line" "$RUNTIME_STATE_FILE" "$pid" <<'PY'
+import json
 import shlex
 import sys
+from pathlib import Path
 
 command = sys.argv[1]
+runtime_state_path = Path(sys.argv[2])
+pid = int(sys.argv[3])
 parts = shlex.split(command)
-model = "unknown"
+startup_model = "unknown"
 if "--model" in parts:
     index = parts.index("--model")
     if index + 1 < len(parts):
-        model = parts[index + 1]
-print(f"Loaded model: {model}")
+        startup_model = parts[index + 1]
+
+runtime_model = ""
+prompt_cache = {}
+try:
+    state = json.loads(runtime_state_path.read_text(encoding="utf-8"))
+    if state.get("pid") == pid:
+        runtime_model = str(state.get("runtime_model") or "")
+        prompt_cache = state.get("prompt_cache") or {}
+except (OSError, ValueError, TypeError):
+    pass
+
+print(f"Loaded model: {runtime_model or startup_model}")
+print(f"Startup model: {startup_model}")
+if prompt_cache:
+    sequences = prompt_cache.get("sequences", 0)
+    cache_bytes = prompt_cache.get("bytes", 0)
+    max_bytes = prompt_cache.get("max_bytes")
+    print(f"Prompt cache: {sequences} sequence(s), {cache_bytes} bytes")
+    if max_bytes is not None:
+        print(f"Prompt cache limit: {max_bytes} bytes")
 print(f"Command: {command}")
 PY
 }

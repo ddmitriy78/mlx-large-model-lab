@@ -2,6 +2,22 @@
 
 Helper scripts for running the local MLX model lab.
 
+## `macos-startup`
+
+Installs per-user macOS LaunchAgents that start the MLX server and Control
+Center at login:
+
+```bash
+scripts/macos-startup install qwen3-coder-next-8bit
+scripts/macos-startup status
+scripts/macos-startup uninstall
+```
+
+The optional model alias controls which model is loaded after the next login.
+The default is `qwen3-coder-next-8bit`. The Control Center is kept alive by
+`launchd`; the MLX service uses the existing `scripts/mlx-server` background
+launcher so model switching and unloading continue to work normally.
+
 ## `mlx-server`
 
 Starts and manages the local OpenAI-compatible MLX server. By default it serves:
@@ -17,7 +33,7 @@ http://127.0.0.1:48080/v1
 The launcher runs the repo wrapper `mlx_lab.mlx_server`, which keeps MLX
 generation behavior but makes `GET /v1/models` advertise downloaded models from
 `configs/models.json`. Completion requests may use those advertised aliases,
-for example `qwen3-coder-next` or `glm-4-5-air`.
+for example `qwen3-coder-next` or `qwen3-coder-next-8bit`.
 
 ## Commands
 
@@ -48,6 +64,12 @@ curl http://127.0.0.1:8765/api/mlx-server/current
 curl -X POST http://127.0.0.1:8765/api/mlx-server/load \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-coder-next-8bit"}'
+curl -X POST http://127.0.0.1:8765/api/mlx-server/cancel \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+curl -X POST http://127.0.0.1:8765/api/mlx-server/cache/clear \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 curl -X POST http://127.0.0.1:8765/api/mlx-server/unload
 ```
 
@@ -129,15 +151,6 @@ Serve another configured local or hosted model:
 ```bash
 scripts/mlx-server models
 scripts/mlx-server load qwen3-6-27b-obliterated
-scripts/mlx-server load glm-4-5-air
-```
-
-GLM is configured as a chat-only opencode agent because it is not reliable as
-an opencode tool-calling model. Use the `glm-chat` agent instead of launching
-the model directly:
-
-```bash
-opencode --agent glm-chat
 ```
 
 The workspace also defines chat-only agents for the other comparison models:
@@ -172,6 +185,22 @@ Set `MLX_SERVER_MODEL_LIST=runtime` when you need raw upstream `mlx_lm.server`
 model discovery instead of the configured workspace registry.
 Set `MLX_SERVER_ADVERTISE_UNDOWNLOADED=1` to include configured models that are
 not present under `models/` yet.
+
+The managed wrapper enforces a combined prompt/output context cap and estimates
+active KV-cache memory before prefill. It reserves 16 GB of available memory by
+default, clears retained caches under that threshold, and cancels active
+requests below 8 GB. Configure the next server process with:
+
+```bash
+MLX_SERVER_MAX_CONTEXT_TOKENS=128000 \
+MLX_SERVER_MAX_OUTPUT_TOKENS=32000 \
+MLX_SERVER_MEMORY_RESERVE_BYTES=16GB \
+MLX_SERVER_MEMORY_ABORT_BYTES=8GB \
+  scripts/mlx-server load qwen3-coder-30b-8bit
+```
+
+The same settings can be changed for the current process from the control
+center. In-memory changes reset to the environment defaults after a restart.
 
 ## Notes
 

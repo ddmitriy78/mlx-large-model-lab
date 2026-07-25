@@ -8,10 +8,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from .cli import (
     ROOT,
@@ -24,6 +28,12 @@ from .cli import (
 )
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+PROMPT_PROGRESS_RE = re.compile(
+    r"Prompt processing progress:\s+(?P<current>\d+)/(?P<total>\d+)"
+)
+PROMPT_CACHE_RE = re.compile(
+    r"Prompt Cache:\s+(?P<sequences>\d+) sequences,\s+(?P<gigabytes>[\d.]+) GB"
+)
 
 
 class JobState:
@@ -91,9 +101,17 @@ class JobState:
 
 JOB = JobState()
 MLX_SERVER_SCRIPT = ROOT / "scripts" / "mlx-server"
+MLX_SERVER_LOG = ROOT / "logs" / "mlx-server.log"
+MLX_SERVER_RUNTIME_STATE = ROOT / "logs" / "mlx-server-runtime.json"
 MLX_SERVER_MUTATING_COMMANDS = {"load", "switch", "unload"}
 MLX_SERVER_COMMANDS = {"current", "list", *MLX_SERVER_MUTATING_COMMANDS}
 MLX_SERVER_LOCK = threading.Lock()
+MLX_INTERNAL_PATHS = {
+    "status": "/mlx-lab/status",
+    "cancel": "/mlx-lab/requests/cancel",
+    "safety": "/mlx-lab/safety",
+    "cache_clear": "/mlx-lab/cache/clear",
+}
 
 
 def rel_path(path: Path) -> str:
@@ -232,6 +250,50 @@ def mlx_server_control_timeout() -> int:
         return 360
 
 
+def mlx_internal_request(
+    action: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: float = 3.0,
+) -> dict[str, Any]:
+    if action not in MLX_INTERNAL_PATHS:
+        raise ValueError("Unsupported MLX runtime action.")
+    try:
+        port = int(os.environ.get("MLX_SERVER_PORT", "48080"))
+    except ValueError as exc:
+        raise ValueError("MLX_SERVER_PORT must be an integer.") from exc
+
+    body = None
+    headers: dict[str, str] = {}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["content-type"] = "application/json"
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{MLX_INTERNAL_PATHS[action]}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            error_payload = json.loads(exc.read().decode("utf-8"))
+        except (ValueError, TypeError):
+            error_payload = {}
+        raise RuntimeError(
+            str(error_payload.get("error") or f"MLX runtime returned HTTP {exc.code}.")
+        ) from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError(f"MLX runtime control is unavailable: {exc}") from exc
+
+    if not isinstance(result, dict):
+        raise RuntimeError("MLX runtime returned an invalid control response.")
+    return result
+
+
 def run_mlx_server_command(command: str, model_key: str | None = None) -> dict[str, Any]:
     if command not in MLX_SERVER_COMMANDS:
         raise ValueError("Unsupported MLX server command.")
@@ -352,16 +414,186 @@ def parse_mlx_server_current(output: str) -> dict[str, Any]:
         "managed_pid": line_value(lines, "Managed PID: ") or "none",
         "listener_pids": listener_pids,
         "loaded_model": line_value(lines, "Loaded model: ") or "unknown",
+        "startup_model": line_value(lines, "Startup model: "),
         "default_model": line_value(lines, "Default model: "),
+        "prompt_cache": line_value(lines, "Prompt cache: "),
+        "prompt_cache_limit": line_value(lines, "Prompt cache limit: "),
         "command_line": line_value(lines, "Command: "),
+    }
+
+
+def canonical_model_ref(value: str) -> str:
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    if path.exists():
+        return str(path.resolve())
+    return value
+
+
+def configured_model_for_ref(value: str) -> dict[str, Any] | None:
+    canonical = canonical_model_ref(value)
+    for model in configured_server_models():
+        candidates = {
+            canonical_model_ref(model["local_path"]),
+            model["repo_id"],
+            model["key"],
+            *model["aliases"],
+        }
+        if canonical in candidates or value in candidates:
+            return model
+    return None
+
+
+def read_runtime_state(pid: int | None = None) -> dict[str, Any]:
+    try:
+        state = json.loads(MLX_SERVER_RUNTIME_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    if pid is not None and state.get("pid") != pid:
+        return {}
+    return state
+
+
+def read_log_activity() -> dict[str, Any]:
+    try:
+        with MLX_SERVER_LOG.open("rb") as file:
+            file.seek(0, os.SEEK_END)
+            size = file.tell()
+            file.seek(max(0, size - 512 * 1024))
+            text = file.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {
+            "active": False,
+            "prompt_current": 0,
+            "prompt_total": 0,
+            "prompt_percent": 0.0,
+            "cache_sequences": 0,
+            "cache_gb": 0.0,
+            "last_error": "",
+            "recent_lines": [],
+        }
+
+    lines = [line for line in text.splitlines() if line.strip()]
+    start_index = max(
+        (index for index, line in enumerate(lines) if "Starting httpd at " in line),
+        default=0,
+    )
+    session_lines = lines[start_index:]
+    progress_index = -1
+    prompt_current = 0
+    prompt_total = 0
+    cache_sequences = 0
+    cache_gb = 0.0
+    completion_index = -1
+    last_error = ""
+
+    for index, line in enumerate(session_lines):
+        if match := PROMPT_PROGRESS_RE.search(line):
+            progress_index = index
+            prompt_current = int(match.group("current"))
+            prompt_total = int(match.group("total"))
+        if match := PROMPT_CACHE_RE.search(line):
+            cache_sequences = int(match.group("sequences"))
+            cache_gb = float(match.group("gigabytes"))
+        if '"POST /v1/' in line or "BrokenPipeError" in line:
+            completion_index = index
+        if "OutOfMemory" in line or "Insufficient Memory" in line:
+            last_error = line.strip()
+
+    active = progress_index > completion_index and prompt_current < prompt_total
+    percent = (
+        round((prompt_current / prompt_total) * 100, 1) if prompt_total else 0.0
+    )
+    return {
+        "active": active,
+        "prompt_current": prompt_current,
+        "prompt_total": prompt_total,
+        "prompt_percent": percent,
+        "cache_sequences": cache_sequences,
+        "cache_gb": cache_gb,
+        "last_error": last_error,
+        "recent_lines": session_lines[-35:],
+    }
+
+
+def system_memory_payload(pid: int | None) -> dict[str, Any]:
+    memory = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+    total = int(memory.total)
+    available = int(memory.available)
+    used = max(0, total - available)
+    used_percent = round((used / total) * 100, 1) if total else 0.0
+    if used_percent >= 90:
+        pressure = "critical"
+    elif used_percent >= 75:
+        pressure = "elevated"
+    else:
+        pressure = "healthy"
+
+    process: dict[str, Any] = {}
+    if pid is not None:
+        try:
+            server_process = psutil.Process(pid)
+            info = server_process.memory_info()
+            process = {
+                "pid": pid,
+                "rss": int(info.rss),
+                "vms": int(info.vms),
+                "status": server_process.status(),
+                "started_at": server_process.create_time(),
+                "cpu_seconds": round(sum(server_process.cpu_times()[:2]), 2),
+            }
+        except (psutil.Error, OSError):
+            process = {}
+
+    return {
+        "pressure": pressure,
+        "total": total,
+        "available": available,
+        "used": used,
+        "used_percent": used_percent,
+        "free": int(memory.free),
+        "active": int(getattr(memory, "active", 0)),
+        "inactive": int(getattr(memory, "inactive", 0)),
+        "wired": int(getattr(memory, "wired", 0)),
+        "cached": int(getattr(memory, "cached", 0)),
+        "swap_used": int(swap.used),
+        "swap_percent": float(swap.percent),
+        "process": process,
+        "load_average": [round(value, 2) for value in os.getloadavg()],
     }
 
 
 def mlx_server_status_payload() -> dict[str, Any]:
     result = run_mlx_server_command("current")
+    status = parse_mlx_server_current(result["stdout"])
+    try:
+        pid = int(status["managed_pid"])
+    except (TypeError, ValueError):
+        pid = None
+    runtime = read_runtime_state(pid)
+    runtime_model = str(runtime.get("runtime_model") or "")
+    if runtime_model:
+        status["loaded_model"] = runtime_model
+    model = configured_model_for_ref(status["loaded_model"])
+    control: dict[str, Any] = {}
+    if status["http_ready"]:
+        try:
+            control = mlx_internal_request("status")
+        except RuntimeError as exc:
+            control = {"ok": False, "error": str(exc)}
     return {
         "ok": result["returncode"] == 0 and not result["timed_out"],
-        "status": parse_mlx_server_current(result["stdout"]),
+        "collected_at": time.time(),
+        "status": status,
+        "runtime": runtime,
+        "control": control,
+        "model": model,
+        "memory": system_memory_payload(pid),
+        "activity": read_log_activity(),
         "result": result,
     }
 
@@ -416,6 +648,30 @@ def mlx_server_help_payload() -> dict[str, Any]:
                 "path": "/api/mlx-server/unload",
                 "description": "Stop the MLX server and release model memory.",
             },
+            {
+                "method": "POST",
+                "path": "/api/mlx-server/cancel",
+                "body": {"request_id": "chatcmpl-optional"},
+                "description": "Cancel one request, or every active request when omitted.",
+            },
+            {
+                "method": "POST",
+                "path": "/api/mlx-server/safety",
+                "body": {
+                    "enabled": True,
+                    "max_context_tokens": 128000,
+                    "max_output_tokens": 32000,
+                    "memory_reserve_bytes": 17179869184,
+                    "memory_abort_bytes": 8589934592,
+                },
+                "description": "Update in-memory admission and memory-guard limits.",
+            },
+            {
+                "method": "POST",
+                "path": "/api/mlx-server/cache/clear",
+                "body": {"entry_id": "cache-optional"},
+                "description": "Clear one retained prompt cache, or all when omitted.",
+            },
         ],
     }
 
@@ -425,7 +681,8 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MLX Lab Control Plane</title>
+  <link rel="icon" href="data:,">
+  <title>MLX Control Center</title>
   <style>
     :root {
       --bg: #f5f7fa;
@@ -436,6 +693,8 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       --accent: #0f766e;
       --accent-dark: #115e59;
       --danger: #b42318;
+      --warning: #b54708;
+      --healthy: #16803c;
       --code: #101827;
     }
     * { box-sizing: border-box; }
@@ -457,6 +716,14 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       justify-content: space-between;
       gap: 16px;
       margin-bottom: 18px;
+    }
+    .eyebrow {
+      margin: 0 0 4px;
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
     }
     h1 {
       margin: 0;
@@ -482,6 +749,192 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       display: block;
       color: var(--text);
       font-size: 15px;
+    }
+    .status[data-state="healthy"] strong { color: var(--healthy); }
+    .status[data-state="elevated"] strong { color: var(--warning); }
+    .status[data-state="critical"] strong { color: var(--danger); }
+    .status small {
+      display: block;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+    .overview {
+      margin-bottom: 16px;
+      padding: 18px;
+    }
+    .overview-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    .overview-heading h2 { margin-bottom: 3px; font-size: 18px; }
+    .muted { margin: 0; color: var(--muted); font-size: 13px; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 2fr repeat(4, minmax(120px, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      min-width: 0;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #f8fafc;
+    }
+    .metric span {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .metric strong {
+      display: block;
+      overflow: hidden;
+      font-size: 16px;
+      font-variant-numeric: tabular-nums;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .metric small {
+      display: block;
+      overflow: hidden;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .memory-panel {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+    }
+    .memory-labels,
+    .request-labels {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 7px;
+      font-size: 12px;
+    }
+    .memory-track,
+    .request-track {
+      height: 12px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e5e9f0;
+    }
+    .memory-fill,
+    .request-fill {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--healthy);
+      transition: width .25s ease, background .25s ease;
+    }
+    .memory-fill.elevated { background: var(--warning); }
+    .memory-fill.critical { background: var(--danger); }
+    .request-fill { background: var(--accent); }
+    .request-meta {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .request-meta small {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+    .request-meta button {
+      flex: 0 0 auto;
+      width: auto;
+      height: 32px;
+      margin: 0;
+      padding: 0 12px;
+    }
+    .control-grid {
+      display: grid;
+      grid-template-columns: minmax(300px, .8fr) minmax(360px, 1.2fr);
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .control-panel {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+    }
+    .control-panel label:first-child { margin-top: 0; }
+    .control-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+    .control-actions button { margin-top: 10px; }
+    .safety-grid {
+      display: grid;
+      grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .panel-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .panel-heading h3 {
+      margin: 0 0 3px;
+      font-size: 14px;
+    }
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 10px;
+    }
+    .safety-summary {
+      min-height: 36px;
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .cache-panel .table-wrap { max-height: 230px; overflow: auto; }
+    .cache-panel td:last-child { text-align: right; }
+    button.inline-button {
+      width: auto;
+      height: 28px;
+      margin: 0;
+      padding: 0 10px;
+      font-size: 11px;
+    }
+    .empty-row {
+      color: var(--muted);
+      text-align: center;
+    }
+    .activity-panel {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fbfcfd;
+    }
+    .activity-panel[hidden] { display: none; }
+    button.compact {
+      width: auto;
+      height: 34px;
+      margin: 0;
+      padding: 0 14px;
     }
     .grid {
       display: grid;
@@ -651,23 +1104,183 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       header { align-items: stretch; flex-direction: column; }
       .status { text-align: left; }
       .grid { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: 1fr 1fr; }
+      .metric:first-child { grid-column: 1 / -1; }
+      .control-grid { grid-template-columns: 1fr; }
+      .safety-grid { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
       .bar { grid-template-columns: 1fr; gap: 4px; }
       th, td { white-space: normal; }
+    }
+    @media (max-width: 520px) {
+      .metric-grid { grid-template-columns: 1fr; }
+      .metric:first-child { grid-column: auto; }
+      .control-actions { grid-template-columns: 1fr; }
+      .field-grid { grid-template-columns: 1fr; }
+      .overview-heading { align-items: stretch; flex-direction: column; }
+      .request-meta { align-items: stretch; flex-direction: column; }
+      .request-meta button { width: 100%; }
+      button.compact { width: 100%; }
     }
   </style>
 </head>
 <body>
   <main>
     <header>
-      <h1>MLX Lab Control Plane</h1>
-      <div class="status"><span>Job</span><strong id="jobState">Idle</strong></div>
+      <div>
+        <p class="eyebrow">Local Apple Silicon operations</p>
+        <h1>MLX Control Center</h1>
+      </div>
+      <div class="status" id="healthCard" data-state="healthy">
+        <span>Server</span>
+        <strong id="serverHealth">Checking…</strong>
+        <small id="lastUpdated">Waiting for telemetry</small>
+      </div>
     </header>
+
+    <section class="overview">
+      <div class="overview-heading">
+        <div>
+          <h2>Runtime overview</h2>
+          <p class="muted">Live model, unified memory, KV cache, and request activity.</p>
+        </div>
+        <button id="refreshServerButton" class="secondary compact" type="button">Refresh</button>
+      </div>
+
+      <div class="metric-grid">
+        <div class="metric">
+          <span>Runtime model</span>
+          <strong id="loadedModelMetric">—</strong>
+          <small id="modelRoleMetric">No model loaded</small>
+        </div>
+        <div class="metric">
+          <span>System memory</span>
+          <strong id="memoryMetric">—</strong>
+          <small id="availableMetric">— available</small>
+        </div>
+        <div class="metric">
+          <span>Prompt cache</span>
+          <strong id="cacheMetric">—</strong>
+          <small id="cacheDetailMetric">—</small>
+        </div>
+        <div class="metric">
+          <span>Swap used</span>
+          <strong id="swapMetric">—</strong>
+          <small>macOS unified memory</small>
+        </div>
+        <div class="metric">
+          <span>Server process</span>
+          <strong id="serverPidMetric">—</strong>
+          <small id="processMetric">—</small>
+        </div>
+      </div>
+
+      <div class="memory-panel">
+        <div class="memory-labels">
+          <strong id="memoryLabel">System memory</strong>
+          <span id="memoryPercent">—</span>
+        </div>
+        <div class="memory-track"><div id="memoryFill" class="memory-fill"></div></div>
+      </div>
+
+      <div id="requestPanel" class="activity-panel" hidden>
+        <div class="request-meta">
+          <div>
+            <strong id="requestTitle">Active request</strong>
+            <small id="requestId">Waiting for request details</small>
+          </div>
+          <button id="cancelRequestButton" class="danger" type="button">Cancel request</button>
+        </div>
+        <div class="request-labels">
+          <span>Progress</span>
+          <span id="requestText">—</span>
+        </div>
+        <div class="request-track"><div id="requestFill" class="request-fill"></div></div>
+      </div>
+
+      <div class="control-grid">
+        <div class="control-panel">
+          <label for="serverModelSelect">Managed model</label>
+          <select id="serverModelSelect"></select>
+          <div class="control-actions">
+            <button id="loadServerButton" type="button">Load / Switch</button>
+            <button id="restartServerButton" class="secondary" type="button">Restart</button>
+            <button id="unloadServerButton" class="danger" type="button">Unload</button>
+          </div>
+          <div class="error" id="serverErrorText"></div>
+        </div>
+        <div class="control-panel">
+          <label>Runtime details</label>
+          <pre id="serverStatusOutput" class="mini-pre"></pre>
+        </div>
+      </div>
+
+      <div class="safety-grid">
+        <div class="control-panel">
+          <div class="panel-heading">
+            <div>
+              <h3>Safety guard</h3>
+              <p class="muted">Admission limits and automatic low-memory cancellation.</p>
+            </div>
+          </div>
+          <label class="check">
+            <input id="guardEnabled" type="checkbox" checked>
+            Memory guard enabled
+          </label>
+          <div class="field-grid">
+            <div>
+              <label for="contextCap">Context cap</label>
+              <input id="contextCap" type="number" min="1024" max="1048576" step="1024">
+            </div>
+            <div>
+              <label for="outputCap">Output cap</label>
+              <input id="outputCap" type="number" min="1" max="131072" step="256">
+            </div>
+            <div>
+              <label for="reserveGib">Admission reserve · GiB</label>
+              <input id="reserveGib" type="number" min="4" max="128" step="1">
+            </div>
+            <div>
+              <label for="abortGib">Emergency cancel · GiB</label>
+              <input id="abortGib" type="number" min="2" max="127" step="1">
+            </div>
+          </div>
+          <button id="saveSafetyButton" type="button">Save safety limits</button>
+          <p id="safetySummary" class="safety-summary">Safety telemetry will appear after the server is ready.</p>
+        </div>
+
+        <div class="control-panel cache-panel">
+          <div class="panel-heading">
+            <div>
+              <h3>Retained prompt cache</h3>
+              <p class="muted">Inspect or release reusable KV-cache entries.</p>
+            </div>
+            <button id="clearCacheButton" class="danger inline-button" type="button">Clear all</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th class="number">Tokens</th>
+                  <th class="number">Memory</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="cacheRows">
+                <tr><td class="empty-row" colspan="4">No retained cache entries</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="error" id="safetyErrorText"></div>
+        </div>
+      </div>
+    </section>
 
     <div class="grid">
       <div class="stack">
         <section>
-          <h2>Benchmark</h2>
+          <h2>Benchmark · <span id="jobState">Idle</span></h2>
           <form id="benchmarkForm">
             <label for="promptSelect">Prompt Set</label>
             <select id="promptSelect"></select>
@@ -699,18 +1312,6 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
           </form>
         </section>
 
-        <section>
-          <h2>MLX Server</h2>
-          <label for="serverModelSelect">Model</label>
-          <select id="serverModelSelect"></select>
-          <div class="button-row">
-            <button id="loadServerButton" type="button">Load / Switch</button>
-            <button id="unloadServerButton" class="danger" type="button">Unload</button>
-          </div>
-          <button id="refreshServerButton" class="secondary" type="button">Refresh Status</button>
-          <pre id="serverStatusOutput" class="mini-pre"></pre>
-          <div class="error" id="serverErrorText"></div>
-        </section>
       </div>
 
       <div class="stack">
@@ -758,18 +1359,63 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
     const startButton = document.querySelector("#startButton");
     const serverModelSelect = document.querySelector("#serverModelSelect");
     const loadServerButton = document.querySelector("#loadServerButton");
+    const restartServerButton = document.querySelector("#restartServerButton");
     const unloadServerButton = document.querySelector("#unloadServerButton");
     const refreshServerButton = document.querySelector("#refreshServerButton");
     const serverStatusOutput = document.querySelector("#serverStatusOutput");
+    const healthCard = document.querySelector("#healthCard");
+    const serverHealth = document.querySelector("#serverHealth");
+    const lastUpdated = document.querySelector("#lastUpdated");
+    const loadedModelMetric = document.querySelector("#loadedModelMetric");
+    const modelRoleMetric = document.querySelector("#modelRoleMetric");
+    const memoryMetric = document.querySelector("#memoryMetric");
+    const availableMetric = document.querySelector("#availableMetric");
+    const cacheMetric = document.querySelector("#cacheMetric");
+    const cacheDetailMetric = document.querySelector("#cacheDetailMetric");
+    const swapMetric = document.querySelector("#swapMetric");
+    const serverPidMetric = document.querySelector("#serverPidMetric");
+    const processMetric = document.querySelector("#processMetric");
+    const memoryLabel = document.querySelector("#memoryLabel");
+    const memoryPercent = document.querySelector("#memoryPercent");
+    const memoryFill = document.querySelector("#memoryFill");
+    const requestPanel = document.querySelector("#requestPanel");
+    const requestTitle = document.querySelector("#requestTitle");
+    const requestId = document.querySelector("#requestId");
+    const requestText = document.querySelector("#requestText");
+    const requestFill = document.querySelector("#requestFill");
+    const cancelRequestButton = document.querySelector("#cancelRequestButton");
+    const guardEnabled = document.querySelector("#guardEnabled");
+    const contextCap = document.querySelector("#contextCap");
+    const outputCap = document.querySelector("#outputCap");
+    const reserveGib = document.querySelector("#reserveGib");
+    const abortGib = document.querySelector("#abortGib");
+    const saveSafetyButton = document.querySelector("#saveSafetyButton");
+    const safetySummary = document.querySelector("#safetySummary");
+    const safetyErrorText = document.querySelector("#safetyErrorText");
+    const clearCacheButton = document.querySelector("#clearCacheButton");
+    const cacheRows = document.querySelector("#cacheRows");
     const logOutput = document.querySelector("#logOutput");
     const runsBody = document.querySelector("#runsBody");
     const bars = document.querySelector("#bars");
+    let currentServerModelKey = "";
+    let activeRequestId = "";
+    let safetyFormModel = "";
 
     async function api(path, options) {
       const response = await fetch(path, options);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Request failed");
       return data;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, character => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[character]);
     }
 
     function renderState(data) {
@@ -817,22 +1463,201 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       }).join("");
     }
 
+    function formatBytes(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+      const bytes = Number(value);
+      const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+      let size = bytes;
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit += 1;
+      }
+      const precision = unit >= 3 ? 1 : (unit === 0 ? 0 : 1);
+      return `${size.toFixed(precision)} ${units[unit]}`;
+    }
+
+    function shortModelName(value) {
+      if (!value || value === "unknown" || value === "none") return "No model loaded";
+      const parts = value.split("/");
+      return parts[parts.length - 1] || value;
+    }
+
+    function renderSafety(safety) {
+      const policy = safety.policy || {};
+      const profile = safety.profile || {};
+      const event = safety.last_event || {};
+      const profileModel = profile.model || "";
+      if (policy.max_context_tokens && safetyFormModel !== profileModel) {
+        guardEnabled.checked = policy.enabled !== false;
+        contextCap.value = policy.max_context_tokens;
+        outputCap.value = policy.max_output_tokens;
+        reserveGib.value = (Number(policy.memory_reserve_bytes || 0) / (1024 ** 3)).toFixed(0);
+        abortGib.value = (Number(policy.memory_abort_bytes || 0) / (1024 ** 3)).toFixed(0);
+        safetyFormModel = profileModel;
+      }
+
+      if (!policy.max_context_tokens) {
+        safetySummary.textContent = "Safety controls are unavailable until the managed MLX server is restarted.";
+        saveSafetyButton.disabled = true;
+        return;
+      }
+
+      saveSafetyButton.disabled = false;
+      const effective = Number(profile.effective_context_tokens || policy.max_context_tokens);
+      const dynamic = Math.min(effective, Number(safety.dynamic_token_budget || effective));
+      const eventText = event.message ? ` Last action: ${event.message}` : "";
+      safetySummary.textContent = [
+        policy.enabled === false ? "Guard off." : "Guard on.",
+        `Effective context ${effective.toLocaleString()} tokens.`,
+        `Current memory budget allows about ${dynamic.toLocaleString()} total active tokens.`,
+        `KV estimate ${formatBytes(profile.kv_bytes_per_token)} per token.`,
+        eventText
+      ].join(" ");
+    }
+
+    function renderCache(cache) {
+      const entries = Array.isArray(cache.entries) ? cache.entries : [];
+      clearCacheButton.disabled = entries.length === 0;
+      if (!entries.length) {
+        cacheRows.innerHTML = '<tr><td class="empty-row" colspan="4">No retained cache entries</td></tr>';
+        return;
+      }
+      cacheRows.innerHTML = entries.map(entry => `
+        <tr title="${escapeHtml(shortModelName(entry.model))}">
+          <td>${escapeHtml(entry.cache_type)}</td>
+          <td class="number">${Number(entry.tokens || 0).toLocaleString()}</td>
+          <td class="number">${formatBytes(entry.bytes)}</td>
+          <td><button class="danger inline-button cache-remove" type="button" data-entry-id="${escapeHtml(entry.id)}">Clear</button></td>
+        </tr>
+      `).join("");
+    }
+
     function renderServerStatus(data) {
       const status = data.status || {};
+      const runtime = data.runtime || {};
+      const control = data.control || {};
+      const memory = data.memory || {};
+      const process = memory.process || {};
+      const activity = data.activity || {};
+      const model = data.model || {};
+      const safety = control.safety || runtime.safety || {};
+      const cache = control.prompt_cache || runtime.prompt_cache || {};
+      const activeRequests = Array.isArray(safety.active_requests)
+        ? safety.active_requests
+        : [];
+      const activeRequest = activeRequests[0] || null;
       const listeners = status.listener_pids && status.listener_pids.length
         ? status.listener_pids.join(", ")
         : "none";
+      const ready = Boolean(status.http_ready);
+      const pressure = memory.pressure || (ready ? "healthy" : "critical");
+      const loadedName = model.label || shortModelName(status.loaded_model);
+      const cacheBytes = cache.bytes ?? Math.round((activity.cache_gb || 0) * 1e9);
+      const cacheSequences = cache.sequences ?? activity.cache_sequences ?? 0;
+      const cacheLimit = cache.max_bytes;
+
+      healthCard.dataset.state = ready ? pressure : "critical";
+      serverHealth.textContent = ready
+        ? (pressure === "healthy" ? "Online · healthy" : `Online · ${pressure}`)
+        : "Offline";
+      lastUpdated.textContent = `Updated ${new Date((data.collected_at || Date.now() / 1000) * 1000).toLocaleTimeString()}`;
+
+      loadedModelMetric.textContent = loadedName;
+      loadedModelMetric.title = status.loaded_model || "";
+      modelRoleMetric.textContent = model.role
+        ? `${model.role}${model.estimated_size_gb ? ` · ~${model.estimated_size_gb} GB` : ""}`
+        : (ready ? "Runtime model reported by MLX" : "No model loaded");
+
+      memoryMetric.textContent = memory.total
+        ? `${formatBytes(memory.used)} / ${formatBytes(memory.total)}`
+        : "—";
+      availableMetric.textContent = memory.available
+        ? `${formatBytes(memory.available)} available`
+        : "— available";
+      cacheMetric.textContent = `${formatBytes(cacheBytes)} · ${cacheSequences}`;
+      cacheDetailMetric.textContent = cacheLimit
+        ? `${formatBytes(cacheLimit)} retained limit`
+        : `${cacheSequences === 1 ? "sequence" : "sequences"} retained`;
+      swapMetric.textContent = formatBytes(memory.swap_used);
+      serverPidMetric.textContent = status.managed_pid && status.managed_pid !== "none"
+        ? `PID ${status.managed_pid}`
+        : "Stopped";
+      processMetric.textContent = process.rss
+        ? `${formatBytes(process.rss)} RSS · ${process.status || "running"}`
+        : "No managed process";
+
+      const usedPercent = Number(memory.used_percent || 0);
+      memoryLabel.textContent = `${pressure[0]?.toUpperCase() || ""}${pressure.slice(1)} · ${formatBytes(memory.wired)} wired`;
+      memoryPercent.textContent = `${usedPercent.toFixed(1)}% used`;
+      memoryFill.style.width = `${Math.min(100, usedPercent)}%`;
+      memoryFill.className = `memory-fill ${pressure === "healthy" ? "" : pressure}`.trim();
+
+      requestPanel.hidden = !activeRequest && !activity.active;
+      if (activeRequest) {
+        activeRequestId = activeRequest.id || "";
+        const promptTotal = Number(activeRequest.prompt_tokens || 0);
+        const promptProcessed = Number(activeRequest.prompt_processed || 0);
+        const outputTokens = Number(activeRequest.output_tokens || 0);
+        const statusName = String(activeRequest.status || "active");
+        const progress = promptTotal
+          ? Math.min(100, (promptProcessed / promptTotal) * 100)
+          : 0;
+        requestTitle.textContent = `Active request · ${statusName}`;
+        requestId.textContent = `${activeRequest.id || "unknown"} · output ${outputTokens.toLocaleString()} / ${Number(activeRequest.max_output_tokens || 0).toLocaleString()}`;
+        requestText.textContent = statusName === "generating"
+          ? `${outputTokens.toLocaleString()} output tokens`
+          : `${promptProcessed.toLocaleString()} / ${promptTotal.toLocaleString()} prompt tokens · ${progress.toFixed(1)}%`;
+        requestFill.style.width = `${statusName === "generating" ? 100 : progress}%`;
+        cancelRequestButton.disabled = statusName === "cancelling";
+      } else if (activity.active) {
+        activeRequestId = "";
+        requestTitle.textContent = "Active prompt prefill";
+        requestId.textContent = "Legacy log telemetry; request ID unavailable";
+        requestText.textContent = `${Number(activity.prompt_current || 0).toLocaleString()} / ${Number(activity.prompt_total || 0).toLocaleString()} tokens · ${activity.prompt_percent || 0}%`;
+        requestFill.style.width = `${Math.min(100, Number(activity.prompt_percent || 0))}%`;
+        cancelRequestButton.disabled = true;
+      } else {
+        activeRequestId = "";
+      }
+
+      renderSafety(safety);
+      renderCache(cache);
+
+      if (model.key) {
+        currentServerModelKey = model.key;
+        if ([...serverModelSelect.options].some(option => option.value === model.key)) {
+          serverModelSelect.value = model.key;
+        }
+      }
+
       serverStatusOutput.textContent = [
         `HTTP: ${status.http_ready ? "ready" : "not ready"} ${status.endpoint || ""}`.trim(),
         `Managed PID: ${status.managed_pid || "none"}`,
         `Listener PID(s): ${listeners}`,
-        `Loaded: ${status.loaded_model || "unknown"}`,
+        `Runtime model: ${status.loaded_model || "unknown"}`,
+        status.startup_model ? `Startup model: ${status.startup_model}` : "",
+        `Pinned model: ${runtime.pinned_model === false ? "no" : "yes"}`,
+        `Prompt cache: ${cacheSequences} sequence(s), ${formatBytes(cacheBytes)}`,
+        cacheLimit ? `Cache limit: ${formatBytes(cacheLimit)}` : "",
+        safety.policy
+          ? `Safety: ${safety.policy.enabled === false ? "off" : "on"} · context ${Number(safety.profile?.effective_context_tokens || safety.policy.max_context_tokens).toLocaleString()} · output ${Number(safety.policy.max_output_tokens).toLocaleString()}`
+          : "Safety: unavailable until restart",
+        `Active requests: ${activeRequests.length}`,
+        activeRequest
+          ? `Request: ${activeRequest.id} · ${activeRequest.status} · prompt ${activeRequest.prompt_processed}/${activeRequest.prompt_tokens}`
+          : (activity.active
+            ? `Prefill: ${activity.prompt_current}/${activity.prompt_total} (${activity.prompt_percent}%)`
+            : "Prefill: idle"),
+        safety.last_event?.message ? `Last safety action: ${safety.last_event.message}` : "",
+        activity.last_error ? `Last memory error: ${activity.last_error}` : "",
         status.default_model ? `Default: ${status.default_model}` : "",
       ].filter(Boolean).join("\n");
     }
 
     function setServerButtonsDisabled(disabled) {
       loadServerButton.disabled = disabled;
+      restartServerButton.disabled = disabled;
       unloadServerButton.disabled = disabled;
       refreshServerButton.disabled = disabled;
     }
@@ -883,6 +1708,82 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       }
     });
 
+    cancelRequestButton.addEventListener("click", async () => {
+      if (!activeRequestId) return;
+      safetyErrorText.textContent = "";
+      cancelRequestButton.disabled = true;
+      try {
+        const data = await api("/api/mlx-server/cancel", {
+          method: "POST",
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify({request_id: activeRequestId})
+        });
+        renderServerStatus(data.status_payload || data);
+      } catch (error) {
+        safetyErrorText.textContent = error.message;
+      } finally {
+        cancelRequestButton.disabled = false;
+      }
+    });
+
+    saveSafetyButton.addEventListener("click", async () => {
+      safetyErrorText.textContent = "";
+      saveSafetyButton.disabled = true;
+      try {
+        const data = await api("/api/mlx-server/safety", {
+          method: "POST",
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify({
+            enabled: guardEnabled.checked,
+            max_context_tokens: Number(contextCap.value),
+            max_output_tokens: Number(outputCap.value),
+            memory_reserve_bytes: Math.round(Number(reserveGib.value) * (1024 ** 3)),
+            memory_abort_bytes: Math.round(Number(abortGib.value) * (1024 ** 3))
+          })
+        });
+        safetyFormModel = "";
+        renderServerStatus(data.status_payload || data);
+      } catch (error) {
+        safetyErrorText.textContent = error.message;
+      } finally {
+        saveSafetyButton.disabled = false;
+      }
+    });
+
+    clearCacheButton.addEventListener("click", async () => {
+      safetyErrorText.textContent = "";
+      clearCacheButton.disabled = true;
+      try {
+        const data = await api("/api/mlx-server/cache/clear", {
+          method: "POST",
+          headers: {"content-type": "application/json"},
+          body: "{}"
+        });
+        renderServerStatus(data.status_payload || data);
+      } catch (error) {
+        safetyErrorText.textContent = error.message;
+        clearCacheButton.disabled = false;
+      }
+    });
+
+    cacheRows.addEventListener("click", async event => {
+      const button = event.target.closest(".cache-remove");
+      if (!button) return;
+      safetyErrorText.textContent = "";
+      button.disabled = true;
+      try {
+        const data = await api("/api/mlx-server/cache/clear", {
+          method: "POST",
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify({entry_id: button.dataset.entryId})
+        });
+        renderServerStatus(data.status_payload || data);
+      } catch (error) {
+        safetyErrorText.textContent = error.message;
+        button.disabled = false;
+      }
+    });
+
     loadServerButton.addEventListener("click", async () => {
       serverErrorText.textContent = "";
       setServerButtonsDisabled(true);
@@ -913,6 +1814,23 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       }
     });
 
+    restartServerButton.addEventListener("click", async () => {
+      serverErrorText.textContent = "";
+      setServerButtonsDisabled(true);
+      try {
+        const data = await api("/api/mlx-server/switch", {
+          method: "POST",
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify({model: currentServerModelKey || serverModelSelect.value})
+        });
+        renderServerStatus(data.status_payload || data);
+      } catch (error) {
+        serverErrorText.textContent = error.message;
+      } finally {
+        setServerButtonsDisabled(false);
+      }
+    });
+
     refreshServerButton.addEventListener("click", async () => {
       serverErrorText.textContent = "";
       setServerButtonsDisabled(true);
@@ -932,6 +1850,11 @@ CONTROL_PLANE_HTML = r"""<!doctype html>
       await refreshJob();
       setInterval(refreshJob, 2000);
       setInterval(refreshRuns, 5000);
+      setInterval(() => {
+        refreshServerStatus().catch(error => {
+          serverErrorText.textContent = error.message;
+        });
+      }, 2000);
     }
 
     init().catch(error => {
@@ -1021,6 +1944,14 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         ):
             self.handle_mlx_server_post(parsed.path.rsplit("/", 1)[-1])
             return
+        runtime_actions = {
+            "/api/mlx-server/cancel": "cancel",
+            "/api/mlx-server/safety": "safety",
+            "/api/mlx-server/cache/clear": "cache_clear",
+        }
+        if parsed.path in runtime_actions:
+            self.handle_mlx_runtime_post(runtime_actions[parsed.path])
+            return
 
         self.send_json({"error": "Not found"}, status=404)
 
@@ -1078,6 +2009,27 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 ),
                 "result": result,
                 "status_payload": status_payload,
+            }
+        )
+
+    def handle_mlx_runtime_post(self, action: str) -> None:
+        try:
+            body = self.read_json_body()
+            result = mlx_internal_request(
+                action,
+                method="POST",
+                payload=body,
+            )
+        except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            self.send_json({"error": str(exc)}, status=400)
+            return
+
+        self.send_json(
+            {
+                "ok": True,
+                "action": action,
+                "result": result,
+                "status_payload": mlx_server_status_payload(),
             }
         )
 

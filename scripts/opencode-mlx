@@ -14,8 +14,8 @@ Targets:
   qwen-coder-next8 Qwen3 Coder Next 8-bit as the normal opencode Build/tool agent
   qwen-coder-next8-chat Qwen3 Coder Next 8-bit as chat-only
   qwen-next80     Qwen3 Next 80B A3B 8-bit as chat-only
-  glm             GLM 4.5 Air as chat-only
   gemma           Gemma 4 31B as chat-only
+  gemma-coder     Gemma 4 12B Coder 8-bit as an experimental tool agent
   deepseek        DeepSeek R1 Distill Qwen 32B 4-bit as chat-only
   deepseek8       DeepSeek R1 Distill Qwen 32B 8-bit as chat-only
   qwen-oblit      Qwen3.6 27B Obliterated as chat-only
@@ -27,7 +27,6 @@ Examples:
   scripts/opencode-mlx qwen30
   scripts/opencode-mlx qwen-coder-next8
   scripts/opencode-mlx qwen-next80
-  scripts/opencode-mlx glm
   scripts/opencode-mlx deepseek --continue
 EOF
 }
@@ -46,6 +45,9 @@ case "$target" in
     ;;
   gemma|gemma-chat)
     exec opencode --agent gemma-chat "$@"
+    ;;
+  gemma-coder|gemma-coder-chat|gemma12-coder)
+    exec opencode --agent gemma-coder-chat "$@"
     ;;
   qwen|qwen-build|build)
     exec opencode -m local-mlx/qwen3-coder-next "$@"
@@ -67,9 +69,6 @@ case "$target" in
     ;;
   qwen-next80|qwen-next80-chat|qwen3-next-80b|qwen3-next-80b-chat)
     exec opencode --agent qwen-next80-chat "$@"
-    ;;
-  glm|glm-chat)
-    exec opencode --agent glm-chat "$@"
     ;;
   deepseek|deepseek-chat|deepseek4)
     exec opencode --agent deepseek-chat "$@"

@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+MLX_SERVER_SCRIPT="$ROOT_DIR/scripts/mlx-server"
+LOG_DIR="$ROOT_DIR/logs"
+LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+DOMAIN="gui/$(id -u)"
+SERVER_LABEL="com.dima.mlx-lab.server"
+CONTROL_CENTER_LABEL="com.dima.mlx-lab.control-center"
+SERVER_PLIST="$LAUNCH_AGENTS_DIR/$SERVER_LABEL.plist"
+CONTROL_CENTER_PLIST="$LAUNCH_AGENTS_DIR/$CONTROL_CENTER_LABEL.plist"
+DEFAULT_MODEL="qwen3-coder-next-8bit"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/macos-startup <command> [model]
+
+Commands:
+  install [model]  Start the MLX server and Control Center at macOS login
+  uninstall        Remove both login services and stop the Control Center
+  status           Show registration and HTTP status for both services
+
+The optional model is the alias loaded after the next login. It defaults to
+qwen3-coder-next-8bit. Uninstalling does not unload the model currently in
+memory; use scripts/mlx-server unload when that is also desired.
+EOF
+}
+
+job_is_loaded() {
+  launchctl print "$DOMAIN/$1" >/dev/null 2>&1
+}
+
+bootout_if_loaded() {
+  local label="$1"
+  local plist="$2"
+
+  if job_is_loaded "$label"; then
+    launchctl bootout "$DOMAIN" "$plist"
+  fi
+}
+
+write_plists() {
+  local model="$1"
+
+  "$PYTHON_BIN" - \
+    "$SERVER_PLIST" \
+    "$CONTROL_CENTER_PLIST" \
+    "$SERVER_LABEL" \
+    "$CONTROL_CENTER_LABEL" \
+    "$ROOT_DIR" \
+    "$MLX_SERVER_SCRIPT" \
+    "$PYTHON_BIN" \
+    "$LOG_DIR" \
+    "$model" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+(
+    server_plist,
+    control_center_plist,
+    server_label,
+    control_center_label,
+    root_dir,
+    mlx_server_script,
+    python_bin,
+    log_dir,
+    model,
+) = sys.argv[1:]
+
+path_value = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+common = {
+    "WorkingDirectory": root_dir,
+    "RunAtLoad": True,
+    "ProcessType": "Background",
+    "EnvironmentVariables": {"PATH": path_value},
+}
+server = {
+    **common,
+    "Label": server_label,
+    "ProgramArguments": [mlx_server_script, "start", model],
+    "StandardOutPath": str(Path(log_dir) / "mlx-server-launchd.log"),
+    "StandardErrorPath": str(Path(log_dir) / "mlx-server-launchd.log"),
+}
+control_center = {
+    **common,
+    "Label": control_center_label,
+    "ProgramArguments": [
+        python_bin,
+        "-m",
+        "mlx_lab.cli",
+        "ui",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+    ],
+    "KeepAlive": True,
+    "ThrottleInterval": 5,
+    "StandardOutPath": str(Path(log_dir) / "control-center.log"),
+    "StandardErrorPath": str(Path(log_dir) / "control-center.log"),
+}
+
+for destination, payload in (
+    (server_plist, server),
+    (control_center_plist, control_center),
+):
+    with Path(destination).open("wb") as file:
+        plistlib.dump(payload, file, sort_keys=False)
+PY
+}
+
+install_services() {
+  local model="${1:-${MLX_SERVER_MODEL:-$DEFAULT_MODEL}}"
+
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Missing project Python environment at $PYTHON_BIN" >&2
+    echo "Run uv sync before installing the login services." >&2
+    exit 1
+  fi
+
+  mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+  bootout_if_loaded "$CONTROL_CENTER_LABEL" "$CONTROL_CENTER_PLIST"
+  bootout_if_loaded "$SERVER_LABEL" "$SERVER_PLIST"
+  write_plists "$model"
+  plutil -lint "$SERVER_PLIST" "$CONTROL_CENTER_PLIST"
+
+  launchctl enable "$DOMAIN/$SERVER_LABEL"
+  launchctl enable "$DOMAIN/$CONTROL_CENTER_LABEL"
+  launchctl bootstrap "$DOMAIN" "$SERVER_PLIST"
+  launchctl bootstrap "$DOMAIN" "$CONTROL_CENTER_PLIST"
+
+  echo "Installed macOS login services."
+  echo "Startup model: $model"
+  echo "MLX server: http://127.0.0.1:48080/v1"
+  echo "Control Center: http://127.0.0.1:8765"
+}
+
+uninstall_services() {
+  bootout_if_loaded "$CONTROL_CENTER_LABEL" "$CONTROL_CENTER_PLIST"
+  bootout_if_loaded "$SERVER_LABEL" "$SERVER_PLIST"
+  rm -f "$CONTROL_CENTER_PLIST" "$SERVER_PLIST"
+
+  echo "Removed macOS login services."
+  echo "The currently loaded MLX model was left running."
+}
+
+print_job_status() {
+  local label="$1"
+  local name="$2"
+
+  if job_is_loaded "$label"; then
+    echo "$name login service: installed"
+  else
+    echo "$name login service: not installed"
+  fi
+}
+
+http_status() {
+  local name="$1"
+  local url="$2"
+
+  if curl -fsS "$url" >/dev/null 2>&1; then
+    echo "$name HTTP: ready ($url)"
+  else
+    echo "$name HTTP: unavailable ($url)"
+  fi
+}
+
+status_services() {
+  print_job_status "$SERVER_LABEL" "MLX server"
+  print_job_status "$CONTROL_CENTER_LABEL" "Control Center"
+  http_status "MLX server" "http://127.0.0.1:48080/v1/models"
+  http_status "Control Center" "http://127.0.0.1:8765/api/mlx-server/status"
+}
+
+case "${1:-}" in
+  install)
+    install_services "${2:-}"
+    ;;
+  uninstall)
+    uninstall_services
+    ;;
+  status)
+    status_services
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

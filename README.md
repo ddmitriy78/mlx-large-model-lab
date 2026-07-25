@@ -63,11 +63,11 @@ currently configured:
 | `qwen3-coder-next-8bit` | `models/Qwen3-Coder-Next-8bit` | Primary opencode, coding, and security-review model |
 | `qwen3-coder-next` | `models/Qwen3-Coder-Next-4bit` | Fast fallback when latency matters |
 | `gemma-4-31b-it-optiq` | `models/gemma-4-31B-it-OptiQ-4bit` | Multimodal threat modeling and diagram analysis |
+| `gemma-4-12b-coder-8bit` | `models/Gemma-4-12B-Coder-Fable5-Composer2.5-8bit` | Experimental lightweight Python coding and opencode tool use |
 | `qwen3-coder-30b-8bit` | `models/Qwen3-Coder-30B-A3B-Instruct-8bit` | New 8-bit Qwen coding model |
 | `qwen3-next-80b-8bit` | `models/Qwen3-Next-80B-A3B-Instruct-8bit` | Large MoE instruction comparison |
 | `deepseek-r1-qwen-32b` | `models/DeepSeek-R1-Distill-Qwen-32B-4bit` | Reasoning comparison |
 | `deepseek-r1-qwen-32b-8bit` | `models/DeepSeek-R1-Distill-Qwen-32B-MLX-8Bit` | 8-bit reasoning comparison |
-| `glm-4-5-air` | `models/GLM-4.5-Air-4bit` | GLM comparison, chat-only in opencode |
 | `qwen3-6-27b-obliterated` | `models/Qwen3.6-27B-OBLITERATED-MLX-4bit` | Experimental long-context comparison |
 
 ### Common Commands
@@ -140,7 +140,7 @@ scripts/mlx-server load gemma-4-31b-it-optiq
 The server launcher advertises downloaded configured model aliases through
 `GET /v1/models`, so discovery-based harnesses can use model ids like
 `qwen3-coder-next`, `qwen3-coder-next-8bit`, `qwen3-coder-30b-8bit`,
-`gemma-4-31b-it-optiq`, `deepseek-r1-qwen-32b-8bit`, or `glm-4-5-air`
+`gemma-4-31b-it-optiq` or `deepseek-r1-qwen-32b-8bit`
 directly.
 
 Stop or inspect the server:
@@ -208,6 +208,20 @@ Serve the model first, then launch opencode:
 scripts/mlx-server load qwen3-coder-next-8bit
 scripts/opencode-mlx primary
 ```
+
+Use the lightweight experimental Gemma coding specialist:
+
+```bash
+scripts/mlx-server load gemma-4-12b-coder-8bit
+scripts/opencode-mlx gemma-coder
+```
+
+This model has experimental opencode tool access. Its fine-tune is focused on
+Python and algorithmic tasks and is intentionally less safety-aligned than the
+primary model, so review file edits and shell commands carefully. The upstream
+MLX snapshot currently labels the architecture
+`gemma4_unified`; with `mlx-lm 0.31.3`, the downloaded `config.json` is locally
+adjusted to `gemma4` before use.
 
 Use chat-only mode when you do not want opencode tool calls:
 
@@ -572,14 +586,6 @@ uv run mlx-lab generate \
   --prompt "Return only the final answer. Start with a Python code block. Write a function that validates an email address without using regex, then explain the tradeoffs in 3 short bullets."
 ```
 
-```bash
-uv run mlx-lab generate \
-  --model models/GLM-4.5-Air-4bit \
-  --max-tokens 1200 \
-  --system-prompt "You are a Python coding assistant. Put the final answer first. Do not narrate your reasoning. Output actual Python code in a fenced code block, then a concise tradeoff summary." \
-  --prompt "Write a Python function that validates an email address without using a regex. Start with the Python code."
-```
-
 What to watch:
 
 - first-token latency, because the model has to load and prefill the prompt
@@ -686,9 +692,6 @@ runs/app-security-outputs/
     qwen3-coder-next/
       01-create-notes-api.md
       02-security-review-notes-api.md
-    glm-4-5-air/
-      01-create-notes-api.md
-      02-security-review-notes-api.md
 ```
 
 ### Reports
@@ -726,8 +729,30 @@ uv run mlx-lab ui
 
 Then open `http://127.0.0.1:8765`.
 
-The control plane is a local-only webpage for visual benchmarking. It lets you:
+To start both the MLX server and Control Center automatically when you log in
+to macOS, install the per-user LaunchAgents:
 
+```bash
+scripts/macos-startup install qwen3-coder-next-8bit
+scripts/macos-startup status
+```
+
+Pass a different configured model alias to change the model loaded after the
+next login. Remove the login services with `scripts/macos-startup uninstall`.
+Uninstalling leaves the currently loaded model running; unload it separately
+with `scripts/mlx-server unload` if needed.
+
+The local-only page now acts as an MLX control center and benchmark console. It
+lets you:
+
+- see the actual runtime model rather than only the process startup command
+- monitor unified-memory use, available memory, wired memory, swap, and process RSS
+- monitor active requests with exact prompt progress and cancel them without restarting
+- reject requests before prefill when context, output, or estimated KV-cache memory is unsafe
+- automatically clear retained cache and cancel active work at low-memory thresholds
+- inspect retained prompt/KV-cache entries and clear one entry or all entries
+- load, restart, switch, or unload one downloaded model
+- see the managed PID, HTTP health, model role, estimated weight size, and cache limit
 - choose a prompt set
 - run one downloaded model or all downloaded models
 - set `max_tokens` and an optional prompt limit
@@ -737,7 +762,35 @@ The control plane is a local-only webpage for visual benchmarking. It lets you:
 - view recent runs
 - open generated HTML reports and JSONL files
 - compare generation speed with a simple bar chart
-- load, switch, unload, and inspect the local MLX server process
+
+The managed server is pinned to the model selected with `scripts/mlx-server`
+or the control center. Requests naming another configured model are rejected
+instead of silently replacing the resident model. Retained prompt caches are
+limited to four entries and 8 GB by default so long OpenCode sessions cannot
+accumulate many full-context KV-cache copies.
+
+The server also keeps a 16 GB admission reserve and cancels active work if
+available memory falls below 8 GB. Admission uses the tokenizer's exact prompt
+count, reserves the requested output tokens, enforces the detected model context
+window, and estimates the active KV-cache allocation before prefill begins.
+These limits can be edited live in the control center. Live edits last until the
+managed MLX process restarts; environment variables set the next process's
+defaults.
+
+Override those safeguards only when intentionally testing:
+
+```bash
+MLX_SERVER_PIN_MODEL=0 scripts/mlx-server load qwen3-coder-30b-8bit
+MLX_SERVER_PROMPT_CACHE_SIZE=6 \
+MLX_SERVER_PROMPT_CACHE_BYTES=12GB \
+  scripts/mlx-server load qwen3-coder-30b-8bit
+
+MLX_SERVER_MAX_CONTEXT_TOKENS=128000 \
+MLX_SERVER_MAX_OUTPUT_TOKENS=32000 \
+MLX_SERVER_MEMORY_RESERVE_BYTES=20GB \
+MLX_SERVER_MEMORY_ABORT_BYTES=10GB \
+  scripts/mlx-server load qwen3-coder-30b-8bit
+```
 
 The control plane also exposes a small local API for model memory management:
 
@@ -752,6 +805,15 @@ curl -X POST http://127.0.0.1:8765/api/mlx-server/load \
 curl -X POST http://127.0.0.1:8765/api/mlx-server/switch \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-coder-next"}'
+curl -X POST http://127.0.0.1:8765/api/mlx-server/cancel \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+curl -X POST http://127.0.0.1:8765/api/mlx-server/cache/clear \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+curl -X POST http://127.0.0.1:8765/api/mlx-server/safety \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"max_context_tokens":128000,"max_output_tokens":32000,"memory_reserve_bytes":17179869184,"memory_abort_bytes":8589934592}'
 curl -X POST http://127.0.0.1:8765/api/mlx-server/unload
 ```
 
@@ -762,7 +824,11 @@ registered in `configs/models.json`.
 
 The control plane does not expose arbitrary shell execution. It only starts the
 whitelisted `mlx-lab benchmark` command with form options and the whitelisted
-`scripts/mlx-server` commands for list/status/load/switch/unload.
+`scripts/mlx-server` commands for list/status/load/switch/unload. The additional
+runtime routes are limited to cancellation, safety-policy updates, and retained
+cache eviction. The status response includes runtime model identity,
+prompt-cache entries, active requests, admission policy, recent prefill
+activity, and system/process memory statistics.
 
 ## 6. Serve The Model Locally
 

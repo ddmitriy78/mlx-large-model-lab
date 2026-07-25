@@ -57,6 +57,17 @@
       "role": "Multimodal threat-modeling specialist",
       "notes": "Gemma 4 conditional-generation model with vision config; retain for diagram/image analysis and threat modeling even though text-only benchmark output is slower and may expose thinking-style text."
     },
+    "gemma_4_12b_coder_fable5_composer25_8bit": {
+      "repo_id": "mlx-community/gemma-4-12b-coder-fable5-composer2.5-8bit",
+      "aliases": [
+        "gemma-4-12b-coder-8bit",
+        "gemma-4-12b-coder"
+      ],
+      "local_dir": "models/Gemma-4-12B-Coder-Fable5-Composer2.5-8bit",
+      "estimated_size_gb": 12.7,
+      "role": "Experimental lightweight Python coding specialist",
+      "notes": "Execution-trained Gemma 4 coding fine-tune. Enabled as an experimental opencode tool agent; validate edits carefully because broader software-engineering, safety, and multi-step tool behavior remain under evaluation. The downloaded config currently requires model_type gemma4 for mlx-lm 0.31.3 compatibility."
+    },
     "qwen3_6_27b_obliterated_mlx_4bit": {
       "repo_id": "edward-lcl/Qwen3.6-27B-OBLITERATED-MLX-4bit",
       "aliases": [
@@ -87,28 +98,18 @@
       "estimated_size_gb": 34.8,
       "role": "Reasoning comparison",
       "notes": "Distilled DeepSeek reasoning target; full DeepSeek-R1 is excluded from v1."
-    },
-    "glm_4_5_air_4bit": {
-      "repo_id": "mlx-community/GLM-4.5-Air-4bit",
-      "aliases": [
-        "glm-4-5-air"
-      ],
-      "local_dir": "models/GLM-4.5-Air-4bit",
-      "estimated_size_gb": 60.2,
-      "role": "GLM/Zhipu comparison",
-      "notes": "Add after primary baselines are working."
     }
   },
   "benchmark_sets": {
     "new_models": [
       "qwen3_coder_next_8bit",
       "qwen3_coder_30b_a3b_instruct_8bit",
-      "qwen3_next_80b_a3b_instruct_8bit"
+      "qwen3_next_80b_a3b_instruct_8bit",
+      "gemma_4_12b_coder_fable5_composer25_8bit"
     ],
     "large_models": [
       "qwen3_coder_next_8bit",
-      "qwen3_next_80b_a3b_instruct_8bit",
-      "glm_4_5_air_4bit"
+      "qwen3_next_80b_a3b_instruct_8bit"
     ],
     "cybersecurity_harness": [
       "qwen3_coder_next_4bit",
@@ -116,7 +117,6 @@
       "qwen3_coder_30b_a3b_instruct_8bit",
       "qwen3_next_80b_a3b_instruct_8bit",
       "deepseek_r1_distill_qwen_32b_8bit",
-      "glm_4_5_air_4bit",
       "gemma_4_31b_it_optiq_4bit"
     ]
   }
