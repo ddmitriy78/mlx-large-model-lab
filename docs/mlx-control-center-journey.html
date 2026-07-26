@@ -1,0 +1,1576 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Building an MLX control plane for running, measuring, and governing large models on Apple Silicon.">
+  <meta name="theme-color" content="#071c1a">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="From a Security Talk to a Local AI Lab">
+  <meta property="og:description" content="Building an MLX control plane for running, measuring, and governing large models on Apple Silicon.">
+  <meta property="article:published_time" content="2026-07-26">
+  <title>From a Security Talk to a Local AI Lab</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #15211f;
+      --muted: #5c6c68;
+      --paper: #fbfaf6;
+      --paper-deep: #f0eee7;
+      --panel: #ffffff;
+      --night: #071c1a;
+      --night-soft: #0d2925;
+      --accent: #0d7c70;
+      --accent-bright: #49d2bd;
+      --accent-pale: #dff6f0;
+      --warm: #f3a85c;
+      --line: #d8dedb;
+      --code: #0b2421;
+      --shadow: 0 18px 55px rgb(18 38 34 / 12%);
+      --radius: 18px;
+      --content: 760px;
+      --wide: 1180px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      font-size: 18px;
+      line-height: 1.72;
+      text-rendering: optimizeLegibility;
+    }
+
+    a {
+      color: var(--accent);
+      text-underline-offset: .18em;
+      text-decoration-thickness: 1px;
+    }
+
+    a:hover {
+      color: #075e56;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 28px 24px 88px;
+      background:
+        radial-gradient(circle at 88% 12%, rgb(73 210 189 / 21%), transparent 31%),
+        radial-gradient(circle at 3% 88%, rgb(243 168 92 / 12%), transparent 29%),
+        var(--night);
+      color: #f6fbf9;
+    }
+
+    .hero::before,
+    .hero::after {
+      position: absolute;
+      border: 1px solid rgb(128 228 211 / 14%);
+      border-radius: 50%;
+      content: "";
+      pointer-events: none;
+    }
+
+    .hero::before {
+      top: -230px;
+      right: -160px;
+      width: 560px;
+      height: 560px;
+    }
+
+    .hero::after {
+      right: 90px;
+      bottom: -260px;
+      width: 460px;
+      height: 460px;
+    }
+
+    .hero-inner,
+    .article,
+    .wide,
+    .footer-inner {
+      position: relative;
+      z-index: 1;
+      margin-right: auto;
+      margin-left: auto;
+    }
+
+    .hero-inner {
+      width: min(var(--wide), 100%);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 92px;
+      font-size: 13px;
+    }
+
+    .wordmark {
+      color: var(--accent-bright);
+      font-weight: 850;
+      letter-spacing: .13em;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+
+    .source-link {
+      padding: 8px 13px;
+      border: 1px solid rgb(255 255 255 / 18%);
+      border-radius: 999px;
+      color: #e6f1ee;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .source-link:hover {
+      border-color: var(--accent-bright);
+      color: var(--accent-bright);
+    }
+
+    .kicker {
+      margin: 0 0 20px;
+      color: var(--accent-bright);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 980px;
+      margin: 0;
+      font-size: clamp(48px, 7.4vw, 94px);
+      font-weight: 790;
+      letter-spacing: -.034em;
+      line-height: .98;
+    }
+
+    .hero-deck {
+      max-width: 820px;
+      margin: 30px 0 0;
+      color: #b9cbc7;
+      font-size: clamp(20px, 2.3vw, 29px);
+      letter-spacing: -.008em;
+      line-height: 1.42;
+    }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 44px;
+    }
+
+    .hero-meta span,
+    .hero-meta time {
+      padding: 8px 12px;
+      border: 1px solid rgb(255 255 255 / 13%);
+      border-radius: 999px;
+      background: rgb(255 255 255 / 5%);
+      color: #d7e5e1;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    main {
+      padding: 76px 24px 100px;
+    }
+
+    .article {
+      width: min(var(--content), 100%);
+    }
+
+    .wide {
+      width: min(var(--wide), 100%);
+    }
+
+    .lede {
+      margin: 0 0 38px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(25px, 3vw, 34px);
+      letter-spacing: -.025em;
+      line-height: 1.48;
+    }
+
+    .lede::first-letter {
+      float: left;
+      margin: .09em .12em 0 0;
+      color: var(--accent);
+      font-family: Inter, ui-sans-serif, sans-serif;
+      font-size: 3.4em;
+      font-weight: 850;
+      line-height: .73;
+    }
+
+    .section-label {
+      margin: 72px 0 12px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin: 0 0 24px;
+      font-size: clamp(34px, 4.6vw, 56px);
+      font-weight: 780;
+      letter-spacing: -.028em;
+      line-height: 1.06;
+    }
+
+    h3 {
+      margin: 38px 0 12px;
+      font-size: 24px;
+      letter-spacing: -.025em;
+      line-height: 1.25;
+    }
+
+    p {
+      margin: 0 0 24px;
+    }
+
+    strong {
+      font-weight: 760;
+    }
+
+    .result-card {
+      margin: 34px 0 26px;
+      padding: 26px;
+      border: 1px solid #badfd7;
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, #eaf8f4, #fff);
+      box-shadow: 0 12px 34px rgb(29 95 83 / 8%);
+    }
+
+    .result-card .result-label {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .result-card p {
+      margin: 0;
+    }
+
+    .result-card p + p {
+      margin-top: 15px;
+      padding-top: 15px;
+      border-top: 1px solid #cce4de;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    .article-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin: 0 0 42px;
+      padding: 0 0 22px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 720;
+    }
+
+    .article-nav span {
+      color: var(--muted);
+    }
+
+    .article-nav a {
+      text-decoration: none;
+    }
+
+    .pullquote {
+      position: relative;
+      margin: 54px 0;
+      padding: 30px 0 30px 34px;
+      border-left: 5px solid var(--accent);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(27px, 3.4vw, 39px);
+      letter-spacing: -.024em;
+      line-height: 1.35;
+    }
+
+    .pullquote small {
+      display: block;
+      margin-top: 15px;
+      color: var(--muted);
+      font-family: Inter, ui-sans-serif, sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .spec-card {
+      margin: 45px 0;
+      padding: 26px;
+      border: 1px solid #bedfd8;
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, #eefaf6, #fff);
+      box-shadow: 0 12px 34px rgb(29 95 83 / 8%);
+    }
+
+    .spec-card p {
+      margin: 0 0 17px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 750;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    .spec-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .spec {
+      min-width: 0;
+      padding: 14px;
+      border-radius: 12px;
+      background: rgb(255 255 255 / 78%);
+    }
+
+    .spec strong,
+    .spec span {
+      display: block;
+    }
+
+    .spec strong {
+      font-size: 20px;
+      line-height: 1.2;
+    }
+
+    .spec span {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .journey {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      margin: 46px 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--line);
+    }
+
+    .journey-step {
+      min-height: 176px;
+      padding: 22px;
+      background: var(--panel);
+    }
+
+    .journey-step span {
+      display: block;
+      margin-bottom: 28px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: .11em;
+    }
+
+    .journey-step strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 17px;
+      line-height: 1.3;
+    }
+
+    .journey-step p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .design-decisions {
+      display: grid;
+      gap: 1px;
+      margin: 34px 0 50px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--line);
+    }
+
+    .design-decision {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 18px;
+      padding: 18px 20px;
+      background: var(--panel);
+    }
+
+    .design-decision strong {
+      color: var(--accent);
+      font-size: 14px;
+    }
+
+    .design-decision p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .architecture {
+      margin: 52px 0;
+      padding: 30px;
+      border-radius: var(--radius);
+      background:
+        radial-gradient(circle at 96% 0, rgb(73 210 189 / 13%), transparent 28%),
+        var(--night);
+      color: #eaf3f0;
+      box-shadow: var(--shadow);
+    }
+
+    .architecture-header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+
+    .architecture-header h2 {
+      margin: 0;
+      color: #fff;
+      font-size: clamp(27px, 3vw, 38px);
+    }
+
+    .architecture-header p {
+      max-width: 490px;
+      margin: 0;
+      color: #abc3bd;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .architecture-clients {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 9px;
+    }
+
+    .architecture-node {
+      padding: 13px 15px;
+      border: 1px solid rgb(255 255 255 / 12%);
+      border-radius: 10px;
+      background: rgb(255 255 255 / 6%);
+      color: #dcebe7;
+      font-size: 13px;
+      font-weight: 720;
+      text-align: center;
+    }
+
+    .architecture-arrow {
+      margin: 10px 0;
+      color: var(--accent-bright);
+      font-size: 20px;
+      font-weight: 850;
+      line-height: 1;
+      text-align: center;
+    }
+
+    .architecture-lanes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .architecture-lane {
+      padding: 18px;
+      border: 1px solid rgb(255 255 255 / 11%);
+      border-top: 3px solid var(--accent-bright);
+      border-radius: 11px;
+      background: var(--night-soft);
+    }
+
+    .architecture-lane.control {
+      border-top-color: var(--warm);
+    }
+
+    .architecture-lane h3 {
+      margin: 0 0 10px;
+      color: #fff;
+      font-size: 16px;
+    }
+
+    .architecture-lane ol {
+      margin: 0;
+      padding-left: 19px;
+      color: #b9cec8;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .architecture-runtime {
+      padding: 15px;
+      border: 1px solid rgb(73 210 189 / 25%);
+      border-radius: 10px;
+      background: rgb(73 210 189 / 8%);
+      color: #e5f6f2;
+      font-size: 14px;
+      font-weight: 760;
+      text-align: center;
+    }
+
+    .ownership-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 34px 0 46px;
+    }
+
+    .ownership-panel {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+    }
+
+    .ownership-panel.project {
+      border-color: #a8d9d0;
+      background: #edf9f6;
+    }
+
+    .ownership-panel h3 {
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+
+    .ownership-panel ul {
+      margin: 0;
+      padding-left: 19px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .ownership-panel li {
+      margin: 7px 0;
+    }
+
+    pre {
+      margin: 32px 0;
+      padding: 22px;
+      overflow-x: auto;
+      border: 1px solid #17413b;
+      border-radius: 14px;
+      background: var(--code);
+      color: #d9ebe6;
+      font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    p code,
+    li code {
+      padding: .14em .36em;
+      border: 1px solid #d8dfdc;
+      border-radius: 5px;
+      background: #f1f3f1;
+      font-size: .88em;
+    }
+
+    figure {
+      width: min(var(--wide), calc(100vw - 32px));
+      margin: 58px 50%;
+      transform: translateX(-50%);
+    }
+
+    .screenshot-frame {
+      overflow: hidden;
+      border: 1px solid #cdd7d3;
+      border-radius: 18px;
+      background: #edf1f4;
+      box-shadow: var(--shadow);
+    }
+
+    .screenshot-frame a {
+      display: block;
+    }
+
+    .screenshot-frame img {
+      width: 100%;
+      height: auto;
+    }
+
+    figcaption {
+      max-width: 820px;
+      margin: 16px auto 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+      text-align: center;
+    }
+
+    .memory-list {
+      margin: 30px 0 46px;
+      padding: 0;
+      list-style: none;
+      counter-reset: guard;
+    }
+
+    .memory-list li {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 14px;
+      align-items: start;
+      margin-bottom: 19px;
+      counter-increment: guard;
+    }
+
+    .memory-list li::before {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--accent-pale);
+      color: var(--accent);
+      content: counter(guard, decimal-leading-zero);
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .memory-list strong,
+    .memory-list span {
+      display: block;
+    }
+
+    .memory-list strong {
+      margin: 1px 0 2px;
+      line-height: 1.35;
+    }
+
+    .memory-list span {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    .limits-wrap {
+      margin: 30px 0 48px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+    }
+
+    .limits-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .limits-table th,
+    .limits-table td {
+      padding: 13px 15px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .limits-table th {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .limits-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .limits-table td:first-child {
+      width: 31%;
+      font-weight: 740;
+    }
+
+    .note {
+      margin: 34px 0;
+      padding: 22px 24px;
+      border: 1px solid #e0d2c0;
+      border-radius: 14px;
+      background: #fff9ef;
+      color: #554536;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    .note strong {
+      color: #7d4d1b;
+    }
+
+    .security {
+      margin: 58px 0;
+      padding: 34px;
+      border-radius: var(--radius);
+      background:
+        linear-gradient(135deg, rgb(13 124 112 / 10%), transparent 55%),
+        #edf2ef;
+    }
+
+    .security h3 {
+      margin-top: 0;
+      font-size: 28px;
+    }
+
+    .security ul {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    .security li {
+      margin: 9px 0;
+    }
+
+    .today-next {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin: 36px 0 50px;
+    }
+
+    .today-next > div {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+    }
+
+    .today-next h3 {
+      margin: 0 0 14px;
+      font-size: 19px;
+    }
+
+    .today-next ul {
+      margin: 0;
+      padding-left: 19px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .today-next li {
+      margin: 7px 0;
+    }
+
+    .resources {
+      margin-top: 74px;
+      padding-top: 42px;
+      border-top: 1px solid var(--line);
+    }
+
+    .resources h2 {
+      font-size: 32px;
+    }
+
+    .resources ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .resources li {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 15px;
+    }
+
+    .resources li:last-child {
+      border-bottom: 0;
+    }
+
+    footer {
+      padding: 54px 24px;
+      background: var(--night);
+      color: #afc3be;
+    }
+
+    .footer-inner {
+      display: flex;
+      width: min(var(--wide), 100%);
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      font-size: 13px;
+    }
+
+    .footer-inner p {
+      margin: 0;
+    }
+
+    .footer-inner a {
+      color: var(--accent-bright);
+    }
+
+    @media (max-width: 900px) {
+      .topbar {
+        margin-bottom: 68px;
+      }
+
+      .journey {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .spec-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .architecture-header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .ownership-grid {
+        grid-template-columns: 1fr;
+      }
+
+      figure {
+        width: min(100vw - 24px, var(--wide));
+      }
+    }
+
+    @media (max-width: 620px) {
+      body {
+        font-size: 17px;
+      }
+
+      .hero {
+        padding: 22px 18px 64px;
+      }
+
+      .topbar {
+        margin-bottom: 56px;
+      }
+
+      .source-link {
+        padding: 7px 10px;
+      }
+
+      h1 {
+        font-size: clamp(44px, 15vw, 65px);
+      }
+
+      .hero-deck {
+        font-size: 20px;
+      }
+
+      main {
+        padding: 56px 18px 80px;
+      }
+
+      .lede {
+        margin-bottom: 34px;
+        font-size: 25px;
+      }
+
+      .journey,
+      .today-next {
+        grid-template-columns: 1fr;
+      }
+
+      .journey-step {
+        min-height: auto;
+      }
+
+      .journey-step span {
+        margin-bottom: 12px;
+      }
+
+      .architecture,
+      .security {
+        padding: 24px;
+      }
+
+      .architecture-clients,
+      .architecture-lanes {
+        grid-template-columns: 1fr;
+      }
+
+      .design-decision {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+
+      .limits-table {
+        min-width: 620px;
+      }
+
+      figure {
+        margin-top: 42px;
+        margin-bottom: 42px;
+      }
+
+      .screenshot-frame {
+        overflow-x: auto;
+      }
+
+      .screenshot-frame img {
+        width: 960px;
+        max-width: none;
+      }
+
+      figcaption {
+        padding: 0 10px;
+      }
+
+      .footer-inner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+        font-size: 11pt;
+      }
+
+      .hero {
+        padding-bottom: 40px;
+        background: #fff;
+        color: #111;
+      }
+
+      .hero-deck,
+      .topbar {
+        color: #333;
+      }
+
+      .source-link,
+      .hero-meta {
+        display: none;
+      }
+
+      main {
+        padding-top: 35px;
+      }
+
+      figure {
+        width: 100%;
+        break-inside: avoid;
+      }
+
+      .screenshot-frame {
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <nav class="topbar" aria-label="Article links">
+        <a class="wordmark" href="https://github.com/ddmitriy78/mlx-large-model-lab">MLX Large Model Lab</a>
+        <a class="source-link" href="https://github.com/ddmitriy78/mlx-large-model-lab">View the project ↗</a>
+      </nav>
+
+      <p class="kicker">Build log · Local AI · Apple Silicon</p>
+      <h1>From a security talk to a local AI lab</h1>
+      <p class="hero-deck">
+        Building an MLX control plane for running, measuring, and governing
+        large models on Apple Silicon.
+      </p>
+      <div class="hero-meta" aria-label="Article topics">
+        <time datetime="2026-07-26">July 26, 2026</time>
+        <span>M5 Max</span>
+        <span>128 GB unified memory</span>
+        <span>4 TB SSD</span>
+        <span>MLX + mlx-lm</span>
+        <span>Local-first</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <article>
+      <div class="article">
+        <p class="lede">
+          The idea started at a cybersecurity talk. Several founders were
+          describing the same shift from different angles: the model matters,
+          but the harness around it may matter just as much.
+        </p>
+
+        <p>
+          They were talking about smaller, purpose-selected models with unusual
+          strengths—models that become far more useful when a purpose-built
+          harness controls their instructions, tools, context, permissions, and
+          operating boundaries. That framing stuck with me. It sounded less like
+          “pick the smartest chatbot” and more like systems engineering.
+        </p>
+
+        <aside class="result-card">
+          <span class="result-label">What I built</span>
+          <p>
+            The result is an Apple Silicon inference lab with a managed MLX
+            server, an OpenAI-compatible endpoint, reproducible benchmarks,
+            memory admission controls, privacy-bounded telemetry, and a browser
+            Control Center. This build catalogs nine downloaded models, including
+            coding, reasoning, multimodal, and 80B-class comparison targets.
+          </p>
+          <p>
+            <strong>Terminology:</strong> “AI harness” means the full operating
+            environment around a model. “Model Harness” refers specifically to
+            the interactive testing view inside the Control Center.
+          </p>
+        </aside>
+
+        <nav class="article-nav" aria-label="Article sections">
+          <span>Jump to</span>
+          <a href="#architecture">Architecture</a>
+          <a href="#server">MLX server</a>
+          <a href="#memory">Memory controls</a>
+          <a href="#benchmarks">Benchmarks</a>
+          <a href="#security">Security</a>
+        </nav>
+
+        <blockquote class="pullquote">
+          A model is potential. A harness turns that potential into a controlled
+          capability.
+          <small>The idea that started the project</small>
+        </blockquote>
+
+        <p class="section-label">The hardware decision</p>
+        <h2 id="hardware">The next day, I pulled the trigger</h2>
+
+        <p>
+          I ordered the most expensive laptop I had ever bought: a MacBook Pro
+          with an M5 Max, 128 GB of unified memory, and a 4 TB SSD. The storage
+          mattered because model weights add up quickly. The memory mattered even
+          more because, on Apple silicon, the CPU and GPU work from the same
+          memory pool. That makes the machine unusually interesting for local
+          model experimentation.
+        </p>
+
+        <div class="spec-card" aria-label="Lab hardware">
+          <p>The local lab</p>
+          <div class="spec-grid">
+            <div class="spec">
+              <strong>M5 Max</strong>
+              <span>Apple silicon with a 40-core GPU configuration available</span>
+            </div>
+            <div class="spec">
+              <strong>128 GB</strong>
+              <span>Unified memory shared across CPU and GPU workloads</span>
+            </div>
+            <div class="spec">
+              <strong>4 TB</strong>
+              <span>Enough local SSD capacity to keep a varied model library</span>
+            </div>
+          </div>
+        </div>
+
+        <p>
+          Apple’s current
+          <a href="https://www.apple.com/macbook-pro/specs/">MacBook Pro specifications</a>
+          list the M5 Max with up to 128 GB of unified memory. MLX is especially
+          relevant here because its arrays live in shared memory and can be used
+          by the CPU or GPU without an explicit copy between separate memory
+          pools, as described in the
+          <a href="https://github.com/ml-explore/mlx">official MLX project</a>.
+        </p>
+
+        <p class="section-label">Learning the ecosystem</p>
+        <h2>First, I had to learn what a model actually is</h2>
+
+        <p>
+          I started where many people start:
+          <a href="https://huggingface.co/docs/hub/main/models">Hugging Face</a>.
+          I wanted to understand how people discover models, how weights and
+          configuration files are stored, how revisions are shared, what model
+          cards do, and how a model moves from a repository into a running
+          application.
+        </p>
+
+        <p>
+          The first surprise was how many decisions appear before the first
+          useful prompt: architecture, quantization, context size, chat template,
+          tool-call behavior, licensing, disk size, memory pressure, and the
+          difference between loading a model and merely having it downloaded.
+          “Run an open model” is not one decision. It is a chain of them.
+        </p>
+      </div>
+
+      <div class="wide">
+        <div class="journey" aria-label="Project evolution">
+          <div class="journey-step">
+            <span>01</span>
+            <strong>Discover</strong>
+            <p>Browse model cards, architectures, quantizations, and intended roles.</p>
+          </div>
+          <div class="journey-step">
+            <span>02</span>
+            <strong>Run</strong>
+            <p>Load MLX weights locally and expose a familiar chat-completion API.</p>
+          </div>
+          <div class="journey-step">
+            <span>03</span>
+            <strong>Measure</strong>
+            <p>Benchmark prompt processing, generation speed, memory, and behavior.</p>
+          </div>
+          <div class="journey-step">
+            <span>04</span>
+            <strong>Control</strong>
+            <p>Manage residency, limits, cache, telemetry, and model-specific harnesses.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="article">
+        <p>
+          Codex became my pair programmer through that process. Together we built
+          the project in layers: command-line generation first, then reproducible
+          benchmarks, then a managed server, and finally the visual Control
+          Center. Each layer appeared because the previous one exposed a new
+          operational problem.
+        </p>
+
+        <div class="design-decisions" aria-label="Problems that became controls">
+          <div class="design-decision">
+            <strong>Memory pressure</strong>
+            <p>Keeping large weights and caches resident made the rest of the Mac less responsive, so residency, admission, cache release, and cancellation became explicit controls.</p>
+          </div>
+          <div class="design-decision">
+            <strong>Runtime ownership</strong>
+            <p>If a client-selected model name could change server state, the backend was no longer in control. Model pinning made switching an operator decision.</p>
+          </div>
+          <div class="design-decision">
+            <strong>Benchmark drift</strong>
+            <p>Numbers from different prompts and generation settings were not comparable, so each run now preserves its inputs, settings, measurements, and report.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="wide">
+        <section class="architecture" id="architecture" aria-labelledby="architecture-heading">
+          <div class="architecture-header">
+            <h2 id="architecture-heading">Two paths, one managed runtime</h2>
+            <p>
+              Inference clients use the OpenAI-compatible API. Operator controls
+              use a separate, allowlisted path for lifecycle, memory, cache, and
+              cancellation.
+            </p>
+          </div>
+          <div class="architecture-clients" aria-label="Local clients">
+            <div class="architecture-node">CLI and scripts</div>
+            <div class="architecture-node">OpenCode and API clients</div>
+            <div class="architecture-node">Browser Model Harness</div>
+          </div>
+          <div class="architecture-arrow" aria-hidden="true">↓</div>
+          <div class="architecture-lanes">
+            <div class="architecture-lane">
+              <h3>Inference path</h3>
+              <ol>
+                <li>OpenAI-compatible request</li>
+                <li>Token and memory admission</li>
+                <li>Pinned resident-model execution</li>
+                <li>Streamed response and usage</li>
+              </ol>
+            </div>
+            <div class="architecture-lane control">
+              <h3>Control path</h3>
+              <ol>
+                <li>Operator lifecycle or policy action</li>
+                <li>Load, unload, cache, or cancel</li>
+                <li>Bounded telemetry event</li>
+                <li>Benchmark and runtime evidence</li>
+              </ol>
+            </div>
+          </div>
+          <div class="architecture-arrow" aria-hidden="true">↓</div>
+          <div class="architecture-runtime">
+            Managed MLX Server → MLX / mlx-lm → Apple silicon unified memory
+          </div>
+        </section>
+      </div>
+
+      <div class="article">
+        <p class="section-label">The MLX server</p>
+        <h2 id="server">A stable local endpoint for changing models</h2>
+
+        <p>
+          The managed MLX server gives local applications one consistent endpoint
+          even while I experiment with different weights. It wraps
+          <code>mlx-lm</code> with stable aliases, explicit lifecycle controls,
+          and runtime guardrails. The HTTP surface is compatible with the common
+          chat-completions shape, so clients do not need to know where a model is
+          stored on disk.
+        </p>
+
+        <div class="ownership-grid" aria-label="Upstream and custom capabilities">
+          <div class="ownership-panel">
+            <h3>What MLX and mlx-lm provide</h3>
+            <ul>
+              <li>Apple-silicon shared-memory runtime</li>
+              <li>Model and tokenizer loading</li>
+              <li>Chat templates, sampling, and generation</li>
+              <li>Basic HTTP model-server behavior</li>
+            </ul>
+          </div>
+          <div class="ownership-panel project">
+            <h3>What this project adds</h3>
+            <ul>
+              <li>Capability registry, local paths, and stable aliases</li>
+              <li>Operator-owned lifecycle and model pinning</li>
+              <li>Memory admission, bounded cache, and cancellation</li>
+              <li>Saved benchmarks, bounded telemetry, Control Center, and OpenCode integration</li>
+            </ul>
+          </div>
+        </div>
+
+        <pre aria-label="Example server commands"><code>scripts/mlx-server load qwen3-coder-30b-8bit
+scripts/mlx-server status
+
+# OpenAI-compatible endpoint
+curl http://127.0.0.1:48080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-coder-30b-8bit",
+       "messages":[{"role":"user","content":"Explain this function."}]}'</code></pre>
+
+        <p>
+          Upstream <code>mlx-lm</code> describes its HTTP interface as similar to
+          the OpenAI chat API. It also explicitly says the server is not
+          recommended for production because it implements only basic security
+          checks. That warning shaped my default: the lab binds to
+          <code>127.0.0.1</code>, and remote exposure is out of scope until proper
+          authentication and hardening exist. See the
+          <a href="https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/SERVER.md">official server documentation</a>.
+        </p>
+
+        <p class="section-label">The Control Center</p>
+        <h2 id="control-center">I needed to see the machine, not just the model</h2>
+
+        <p>
+          A terminal is excellent for automation and a poor place to maintain
+          situational awareness. The Control Center makes the server’s actual
+          state visible: the resident model, server process, system and process
+          memory, swap, prompt cache, active requests, and the limits currently
+          protecting the machine.
+        </p>
+      </div>
+
+      <figure>
+        <div class="screenshot-frame">
+          <a href="images/mlx-control-center/operations.png">
+            <img src="images/mlx-control-center/operations.png" width="1440" height="1000"
+              alt="MLX Control Center Operations view showing the active Qwen3 Coder model, system memory, process RSS, runtime details, memory guard limits, and retained prompt cache.">
+          </a>
+        </div>
+        <figcaption>
+          The Operations view proves the separation between inference and
+          control: clients can submit work, but only the operator can switch the
+          resident model, change memory policy, cancel work, or release cache.
+          The local path is abbreviated here for publication.
+        </figcaption>
+      </figure>
+
+      <div class="article">
+        <p class="section-label">The architectural turning point</p>
+        <h2 id="memory">Memory management became a product feature</h2>
+
+        <p>
+          My early experiments made the problem obvious. Downloading many models
+          is mostly a storage question. Keeping models resident is a system
+          question. Large weights, long contexts, active generation, and retained
+          KV caches all compete for the same unified memory used by macOS and
+          every other application.
+        </p>
+
+        <p>
+          That is why the server now treats memory as a controlled resource
+          instead of hoping the machine will sort it out:
+        </p>
+
+        <ol class="memory-list">
+          <li>
+            <div>
+              <strong>Only one explicitly selected model stays resident.</strong>
+              <span>Switching is an operator action, not an accidental side effect of an API request.</span>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Context and output are admitted before generation.</strong>
+              <span>The server checks token limits and an estimated memory budget before expensive work begins.</span>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>A memory reserve protects the rest of the Mac.</strong>
+              <span>New work can be rejected, retained cache can be released, and active work can be cancelled as memory falls.</span>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Every important action remains visible and stoppable.</strong>
+              <span>The Control Center shows the policy, current budget, last safety event, and active request state.</span>
+            </div>
+          </li>
+        </ol>
+
+        <p>
+          The defaults visible in this build cap effective context at 128,000
+          tokens, output at 32,000 tokens, reserve 16 GiB for admission, and use an
+          8 GiB emergency-cancellation threshold. They are operating limits, not
+          promises that every model should use the maximum.
+        </p>
+
+        <div class="limits-wrap">
+          <table class="limits-table">
+            <thead>
+              <tr>
+                <th>Context term</th>
+                <th>What it means in this lab</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Model capability</td>
+                <td>The maximum described by the model architecture and configuration.</td>
+              </tr>
+              <tr>
+                <td>Server cap</td>
+                <td>The policy ceiling accepted by the API; 128,000 tokens in this build.</td>
+              </tr>
+              <tr>
+                <td>Memory-admitted budget</td>
+                <td>The smaller dynamic budget allowed by currently available memory and retained cache.</td>
+              </tr>
+              <tr>
+                <td>Validated context</td>
+                <td>The prompt lengths actually exercised by saved benchmarks; neither of the other limits proves this.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p class="section-label">The model harness</p>
+        <h2 id="model-harness">A fast loop for learning model behavior</h2>
+
+        <p>
+          The Model Harness gives me a controlled place to talk to the active
+          model. I can change the system prompt and generation settings, keep
+          multi-turn history in the browser tab, stream the answer, inspect exact
+          token usage and output speed, and cancel a request through the same
+          server control path.
+        </p>
+      </div>
+
+      <figure>
+        <div class="screenshot-frame">
+          <a href="images/mlx-control-center/model-harness.png">
+            <img src="images/mlx-control-center/model-harness.png" width="1440" height="1000" loading="lazy"
+              alt="MLX Control Center Model Harness with an editable system prompt, generation settings, a user question, streamed local model response, and token-per-second metrics.">
+          </a>
+        </div>
+        <figcaption>
+          The Model Harness uses the same pinned runtime, safety limits, streaming
+          path, usage accounting, and cancellation controls as every other local
+          client. This short 30B-model run produced 46 output tokens at 45.8
+          tokens per second.
+        </figcaption>
+      </figure>
+
+      <div class="article">
+        <p class="section-label">Benchmarking</p>
+        <h2 id="benchmarks">Fast is useful. Comparable is better.</h2>
+
+        <p>
+          Once several models were available, impressions were not enough. I
+          needed repeatable prompt sets and saved evidence. The benchmark runner
+          records model load time, prompt and generation tokens, tokens per
+          second, wall time, finish reason, and peak memory. Each run is written
+          as JSONL and can be rendered as an HTML report.
+        </p>
+
+      </div>
+
+      <figure>
+        <div class="screenshot-frame">
+          <a href="images/mlx-control-center/benchmarks.png">
+            <img src="images/mlx-control-center/benchmarks.png" width="1440" height="1000" loading="lazy"
+              alt="MLX Control Center benchmark statistics comparing nine downloaded models by average generation speed, sample count, prompt speed, best generation speed, and peak memory.">
+          </a>
+        </div>
+        <figcaption>
+          Persisting prompts, settings, and results turns a model collection into
+          a comparison lab instead of a set of anecdotes. In this snapshot,
+          Qwen3 Coder Next 4-bit has the fastest recorded average generation rate.
+        </figcaption>
+      </figure>
+
+      <div class="article">
+        <div class="note">
+          <strong>A benchmark is evidence, not a universal leaderboard.</strong>
+          These figures reflect my machine, model builds, prompts, settings, and
+          saved runs. Quality and tool behavior still need task-specific
+          evaluation; a faster model is not automatically the right model.
+        </div>
+
+        <p>
+          The next promotion gate is a task-quality scorecard: secure-code-review
+          accuracy, patch correctness, false-positive rate, instruction
+          adherence, structured tool-call validity, and hallucinated file or API
+          references. Until that evidence exists, speed remains only one axis.
+        </p>
+
+        <p class="section-label">Telemetry</p>
+        <h2 id="telemetry">Observe the harness without recording everything</h2>
+
+        <p>
+          The telemetry view answers operational questions: Which client is
+          using the server? Which model handled the request? How many input and
+          output tokens moved? How much prompt cache was reused? What was the
+          latency? Did the model emit structured tool calls, and can any of them
+          be attributed to an MCP namespace?
+        </p>
+
+        <p>
+          I did not want observability to become silent conversation logging.
+          The retained JSONL history is bounded. It stores counts, timing, client
+          identity, offered tool names, structured tool-call names, and an
+          optional short preview of the latest user query. It does not retain
+          complete conversations, model responses, reasoning text, or tool
+          arguments. Query previews can be disabled entirely.
+        </p>
+      </div>
+
+      <figure>
+        <div class="screenshot-frame">
+          <a href="images/mlx-control-center/telemetry.png">
+            <img src="images/mlx-control-center/telemetry.png" width="1440" height="1000" loading="lazy"
+              alt="MLX Control Center telemetry view showing request and token counts, latency, a token activity chart, local client activity, model activity, tool activity, and a short query preview.">
+          </a>
+        </div>
+        <figcaption>
+          The telemetry design keeps operational evidence—volume, tokens,
+          clients, models, latency, errors, tools, and MCP attribution—while
+          deliberately excluding full model conversations and tool arguments.
+        </figcaption>
+      </figure>
+
+      <div class="article">
+        <div class="security" id="security">
+          <h3>Local does not automatically mean secure</h3>
+          <p>
+            Keeping inference on the Mac reduces the need to send sensitive
+            prompts to a hosted model, but it does not remove the need for
+            security engineering.
+          </p>
+          <ul>
+            <li>The API and Control Center bind to loopback by default.</li>
+            <li>Control actions use a fixed allowlist and known downloaded models.</li>
+            <li>Remote access needs authentication, authorization, TLS, and a threat model before it should exist.</li>
+            <li>Model weights, model code, prompt content, tools, and generated actions all remain trust boundaries.</li>
+            <li>Tool-capable models require tighter evaluation than chat-only models.</li>
+          </ul>
+        </div>
+
+        <p class="section-label">Where the project stands</p>
+        <h2 id="roadmap">The Control Center is now the beginning, not the finish line</h2>
+
+        <div class="today-next">
+          <div>
+            <h3>Working today</h3>
+            <ul>
+              <li>Model download, registration, and stable aliases</li>
+              <li>OpenAI-compatible discovery and chat completions</li>
+              <li>One-model-at-a-time load, switch, and unload</li>
+              <li>Streamed browser harness with cancellation</li>
+              <li>Memory admission and retained-cache controls</li>
+              <li>Saved benchmarks, aggregate statistics, and HTML reports</li>
+              <li>Bounded request, token, client, tool, and MCP telemetry</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Still ahead</h3>
+            <ul>
+              <li>Stronger security profiles for anything beyond one local user</li>
+              <li>Deeper task-quality and tool-behavior evaluations</li>
+              <li>More model-specific safety and performance tuning</li>
+              <li>Packaged lifecycle commands independent of checkout scripts</li>
+              <li>Clean-machine and second-Mac release verification</li>
+              <li>An explicit open-source license before a public release</li>
+            </ul>
+          </div>
+        </div>
+
+        <p>
+          The difficult part was not getting a model to produce text. It was
+          operating models predictably: controlling residency, memory, context,
+          clients, tools, and evidence. That is the system I am continuing to
+          build.
+        </p>
+
+        <blockquote class="pullquote">
+          I started by collecting models. I ended up building a way to operate
+          them.
+        </blockquote>
+
+        <section class="resources" aria-labelledby="resources-heading">
+          <p class="section-label">Primary sources and project links</p>
+          <h2 id="resources-heading">Explore further</h2>
+          <ul>
+            <li><a href="https://github.com/ddmitriy78/mlx-large-model-lab">MLX Large Model Lab source code</a></li>
+            <li><a href="https://www.apple.com/macbook-pro/specs/">Apple MacBook Pro technical specifications</a></li>
+            <li><a href="https://github.com/ml-explore/mlx">MLX: an array framework for Apple silicon</a></li>
+            <li><a href="https://github.com/ml-explore/mlx-lm">mlx-lm: run language models with MLX</a></li>
+            <li><a href="https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/SERVER.md">mlx-lm HTTP model server documentation</a></li>
+            <li><a href="https://huggingface.co/docs/hub/main/models">Hugging Face model repository documentation</a></li>
+            <li><a href="https://huggingface.co/docs/huggingface_hub/guides/download">Hugging Face model download and cache guide</a></li>
+          </ul>
+        </section>
+      </div>
+    </article>
+  </main>
+
+  <footer>
+    <div class="footer-inner">
+      <p>Built locally on Apple silicon. Screenshots captured from the running MLX Control Center.</p>
+      <a href="https://github.com/ddmitriy78/mlx-large-model-lab">github.com/ddmitriy78/mlx-large-model-lab</a>
+    </div>
+  </footer>
+</body>
+</html>
