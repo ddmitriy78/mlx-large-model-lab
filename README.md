@@ -1,5 +1,9 @@
 # MLX Large Model Lab
 
+<p align="center">
+  <img src="docs/images/readme/mlx-lab-hero.jpg" alt="Abstract neural compute core running on a local processor, surrounded by model nodes and telemetry waves." width="100%">
+</p>
+
 MLX Large Model Lab is a local-first toolkit for downloading, serving,
 benchmarking, and observing MLX language models on Apple Silicon. It adds a
 small operational layer around `mlx-lm`:
@@ -180,6 +184,12 @@ uv run mlx-lab generate \
   --max-tokens 512
 ```
 
+The browser Model Harness provides an interactive version of the same workflow:
+
+<p align="center">
+  <img src="docs/images/readme/control-center-model-harness-demo.jpg" alt="Synthetic MLX Control Center Model Harness showing a generic local-AI conversation and generation controls." width="860">
+</p>
+
 ### 5. Start the managed services
 
 Start the managed OpenAI-compatible server:
@@ -201,6 +211,10 @@ uv run mlx-lab ui
 Then open `http://127.0.0.1:8765`.
 
 ## Model sizing and memory safety
+
+<p align="center">
+  <img src="docs/images/readme/model-fit-safety.jpg" alt="Abstract model core enclosed by unified-memory rings and an outer safety-reserve boundary." width="860">
+</p>
 
 Download size and runtime memory are not the same number. The planner combines:
 
@@ -382,6 +396,10 @@ pinning is enabled.
 
 ## Control Center
 
+<p align="center">
+  <img src="docs/images/readme/control-center-operations-demo.jpg" alt="Synthetic MLX Control Center Operations view showing model controls, a safety guard, and anonymous activity charts." width="860">
+</p>
+
 The local Control Center provides:
 
 - live server, process, unified-memory, prompt-cache, and request status,
@@ -448,6 +466,10 @@ the generation server stops exact token cycles after a substantial repeated
 window, records the cancellation reason, and surfaces it in the model harness.
 A final response without a tool call clears the advisory warning for that run.
 
+<p align="center">
+  <img src="docs/images/readme/control-center-telemetry-demo.jpg" alt="Synthetic MLX Control Center Telemetry view showing anonymous request, token, model, client, and tool activity." width="860">
+</p>
+
 Disable query previews or change retention before starting the server:
 
 ```bash
@@ -458,6 +480,10 @@ MLX_SERVER_TELEMETRY_MAX_RECORDS=2000 scripts/mlx-server restart
 ```
 
 ## Benchmarks
+
+<p align="center">
+  <img src="docs/images/readme/control-center-benchmarks-demo.jpg" alt="Synthetic MLX Control Center Benchmarks view comparing three generic demo models with sample performance data." width="860">
+</p>
 
 Benchmark every downloaded capability model with the bundled prompt set:
 
