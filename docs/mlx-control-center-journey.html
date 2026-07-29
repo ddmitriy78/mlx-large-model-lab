@@ -7,8 +7,9 @@
   <meta name="theme-color" content="#071c1a">
   <meta property="og:type" content="article">
   <meta property="og:title" content="From a Security Talk to a Local AI Lab">
-  <meta property="og:description" content="Building an MLX control plane for running, measuring, and governing large models on Apple Silicon.">
+  <meta property="og:description" content="Building an MLX control plane and a skills-guided MCP security toolkit for open models on Apple Silicon.">
   <meta property="article:published_time" content="2026-07-26">
+  <meta property="article:modified_time" content="2026-07-28">
   <title>From a Security Talk to a Local AI Lab</title>
   <style>
     :root {
@@ -1013,14 +1014,6 @@
         Building an MLX control plane for running, measuring, and governing
         large models on Apple Silicon.
       </p>
-      <div class="hero-meta" aria-label="Article topics">
-        <time datetime="2026-07-26">July 26, 2026</time>
-        <span>M5 Max</span>
-        <span>128 GB unified memory</span>
-        <span>4 TB SSD</span>
-        <span>MLX + mlx-lm</span>
-        <span>Local-first</span>
-      </div>
     </div>
   </header>
 
@@ -1047,8 +1040,10 @@
             The result is an Apple Silicon inference lab with a managed MLX
             server, an OpenAI-compatible endpoint, reproducible benchmarks,
             memory admission controls, privacy-bounded telemetry, and a browser
-            Control Center. This build catalogs nine downloaded models, including
-            coding, reasoning, multimodal, and 80B-class comparison targets.
+            Control Center. It now also connects locally served open models to
+            a skills-guided MCP security-testing toolkit. This build catalogs
+            nine downloaded models, including coding, reasoning, multimodal,
+            and 80B-class comparison targets.
           </p>
           <p>
             <strong>Terminology:</strong> “AI harness” means the full operating
@@ -1061,8 +1056,11 @@
           <span>Jump to</span>
           <a href="#architecture">Architecture</a>
           <a href="#server">MLX server</a>
+          <a href="#opencode">OpenCode</a>
+          <a href="#security-toolkit">Security toolkit</a>
           <a href="#memory">Memory controls</a>
           <a href="#benchmarks">Benchmarks</a>
+          <a href="#telemetry">Telemetry</a>
           <a href="#security">Security</a>
         </nav>
 
@@ -1076,40 +1074,31 @@
         <h2 id="hardware">The next day, I pulled the trigger</h2>
 
         <p>
-          I ordered the most expensive laptop I had ever bought: a MacBook Pro
-          with an M5 Max, 128 GB of unified memory, and a 4 TB SSD. The storage
-          mattered because model weights add up quickly. The memory mattered even
-          more because, on Apple silicon, the CPU and GPU work from the same
-          memory pool. That makes the machine unusually interesting for local
-          model experimentation.
+          The idea stayed with me after the talk. By the next day, curiosity had
+          won: I ordered a MacBook Pro with an M5 Max, 128 GB of unified memory,
+          and a 4 TB SSD. It was a bigger machine than I had ever bought, but I
+          was already thinking less about the laptop and more about the lab I
+          could build around it.
         </p>
 
-        <div class="spec-card" aria-label="Lab hardware">
-          <p>The local lab</p>
-          <div class="spec-grid">
-            <div class="spec">
-              <strong>M5 Max</strong>
-              <span>Apple silicon with a 40-core GPU configuration available</span>
-            </div>
-            <div class="spec">
-              <strong>128 GB</strong>
-              <span>Unified memory shared across CPU and GPU workloads</span>
-            </div>
-            <div class="spec">
-              <strong>4 TB</strong>
-              <span>Enough local SSD capacity to keep a varied model library</span>
-            </div>
-          </div>
-        </div>
+        <p>
+          The storage gave me room to keep different model families and
+          quantizations close at hand instead of constantly deciding what to
+          delete. The unified memory was the more interesting part. On Apple
+          silicon, the CPU and GPU work from the same memory pool. For local AI,
+          that changes what one machine can realistically attempt.
+        </p>
 
         <p>
-          Apple’s current
+          That connection led me to MLX. Apple’s current
           <a href="https://www.apple.com/macbook-pro/specs/">MacBook Pro specifications</a>
-          list the M5 Max with up to 128 GB of unified memory. MLX is especially
-          relevant here because its arrays live in shared memory and can be used
-          by the CPU or GPU without an explicit copy between separate memory
-          pools, as described in the
-          <a href="https://github.com/ml-explore/mlx">official MLX project</a>.
+          list the M5 Max with up to 128 GB of unified memory, and the
+          <a href="https://github.com/ml-explore/mlx">official MLX project</a>
+          is designed for the same shared-memory architecture. Its arrays can be
+          used by the CPU or GPU without an explicit copy between separate
+          memory pools. The more I learned, the more obvious the starting point
+          became: run the models locally, observe what happens, and build the
+          controls I wished existed.
         </p>
 
         <p class="section-label">Learning the ecosystem</p>
@@ -1195,7 +1184,7 @@
           </div>
           <div class="architecture-clients" aria-label="Local clients">
             <div class="architecture-node">CLI and scripts</div>
-            <div class="architecture-node">OpenCode and API clients</div>
+            <div class="architecture-node">OpenCode, skills, and MCP tools</div>
             <div class="architecture-node">Browser Model Harness</div>
           </div>
           <div class="architecture-arrow" aria-hidden="true">↓</div>
@@ -1279,6 +1268,145 @@ curl http://127.0.0.1:48080/v1/chat/completions \
           <a href="https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/SERVER.md">official server documentation</a>.
         </p>
 
+        <p class="section-label">The OpenCode harness</p>
+        <h2 id="opencode">Keep the coding harness stable while the backend changes</h2>
+
+        <p>
+          <a href="https://opencode.ai/docs/models">OpenCode</a> is the harness
+          that made the local server feel useful rather than experimental. It
+          brings repository context, a tool loop, commands, and MCP connections
+          to an OpenAI-compatible model endpoint. I can select a concrete local
+          model when I want to test a particular set of weights.
+        </p>
+
+        <p>
+          The setup I use day to day is simpler. OpenCode points to one stable
+          entry, <code>local-mlx/active</code>. That entry sends
+          <code>default_model</code> to the API, and the managed MLX server
+          resolves it to the model that was explicitly loaded and pinned at
+          startup.
+        </p>
+
+        <pre aria-label="OpenCode active model alias configuration"><code>{
+  "model": "local-mlx/active",
+  "provider": {
+    "local-mlx": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:48080/v1"
+      },
+      "models": {
+        "active": {
+          "id": "default_model",
+          "name": "Active pinned MLX model"
+        }
+      }
+    }
+  }
+}</code></pre>
+
+        <p>
+          That reverses the ownership in a useful way. OpenCode keeps the same
+          model selection while the backend decides which model is resident.
+          Switching weights happens through <code>scripts/mlx-server load</code>
+          or the Control Center, where memory, cache, lifecycle, and safety
+          controls already live. With pinning enabled, a client cannot cause a
+          silent model switch by requesting a different concrete model.
+        </p>
+
+        <div class="note">
+          <strong>The alias is routing, not capability translation.</strong>
+          The active model still needs the tool-calling behavior, context window,
+          and output limits required by the coding task.
+        </div>
+      </div>
+
+      <div class="article">
+        <p class="section-label">The security testing toolkit</p>
+        <h2 id="security-toolkit">Turn a local open-weight model into a bounded security tester</h2>
+
+        <p>
+          Once OpenCode could use the pinned local model reliably, I could test
+          the original idea that inspired the lab: a specialized harness can
+          turn a general model into a controlled capability. I built
+          <a href="https://github.com/ddmitriy78/appsec-audit-mcp">appsec-audit-mcp</a>
+          with the local open-weight coding model working through OpenCode, then
+          packaged it as a separate, installable Python toolkit instead of
+          embedding security scanners in the model server or teaching the model
+          a long list of improvised shell commands.
+        </p>
+
+        <p>
+          The FastMCP server exposes 54 namespaced tools for runtime source
+          selection, static analysis, HTTP interaction, authentication and
+          session inspection, proof-of-concept validation, evidence and coverage
+          tracking, Markdown and HTML reporting, and read-only AWS posture
+          checks. It can run over stdio, or as a macOS login service on the
+          loopback-only Streamable HTTP endpoint
+          <code>http://127.0.0.1:48090/mcp</code>. OpenCode connects to that
+          service once as the global <code>audit</code> MCP.
+        </p>
+
+        <div class="ownership-grid" aria-label="Security toolkit responsibilities">
+          <div class="ownership-panel">
+            <h3>The MCP provides controlled mechanics</h3>
+            <ul>
+              <li>Source mapping, focused scans, and dependency inspection</li>
+              <li>Bounded HTTP, auth, replay, fuzz, race, and PoC operations</li>
+              <li>Citable request, evidence, finding, and coverage state</li>
+              <li>Read-only AWS validation through the local credential chain</li>
+            </ul>
+          </div>
+          <div class="ownership-panel project">
+            <h3>The skills provide assessment judgment</h3>
+            <ul>
+              <li><code>security-audit</code> defines scope, methodology, evidence gates, and deliverables</li>
+              <li><code>appsec-audit-mcp</code> defines safe tool selection and MCP state mechanics</li>
+              <li>The native <code>/security-audit</code> command requires both skills before any audit tool call</li>
+              <li>Scanner matches remain hypotheses until direct evidence validates impact</li>
+            </ul>
+          </div>
+        </div>
+
+        <pre aria-label="OpenCode audit MCP configuration"><code>{
+  "mcp": {
+    "audit": {
+      "type": "remote",
+      "url": "http://127.0.0.1:48090/mcp",
+      "enabled": true
+    }
+  },
+  "permission": {
+    "skill": {
+      "security-audit": "allow",
+      "appsec-audit-mcp": "allow"
+    },
+    "audit_*": "allow"
+  }
+}</code></pre>
+
+        <p>
+          A small installer links the two project skills and the command into
+          OpenCode's global configuration, so the toolkit is available while
+          the local model is testing any authorized application workspace. The
+          model can map an attack surface, form a concrete hypothesis, validate
+          it with a controlled comparison, preserve evidence, and render a
+          report without losing the audit trail between unrelated shell
+          commands.
+        </p>
+
+        <div class="note">
+          <strong>The tools do not expand authorization.</strong>
+          The current workspace defaults to read-only static analysis. Every
+          live target, role, tenant, AWS account, write request, fuzz run, replay,
+          or race test needs explicit scope. Live calls require a full authorized
+          URL, write methods require an explicit opt-in, audit state is isolated
+          by MCP session, and AWS credentials stay outside model prompts and
+          tool arguments.
+        </div>
+      </div>
+
+      <div class="article">
         <p class="section-label">The Control Center</p>
         <h2 id="control-center">I needed to see the machine, not just the model</h2>
 
@@ -1290,21 +1418,6 @@ curl http://127.0.0.1:48080/v1/chat/completions \
           protecting the machine.
         </p>
       </div>
-
-      <figure>
-        <div class="screenshot-frame">
-          <a href="images/mlx-control-center/operations.png">
-            <img src="images/mlx-control-center/operations.png" width="1440" height="1000"
-              alt="MLX Control Center Operations view showing the active Qwen3 Coder model, system memory, process RSS, runtime details, memory guard limits, and retained prompt cache.">
-          </a>
-        </div>
-        <figcaption>
-          The Operations view proves the separation between inference and
-          control: clients can submit work, but only the operator can switch the
-          resident model, change memory policy, cancel work, or release cache.
-          The local path is abbreviated here for publication.
-        </figcaption>
-      </figure>
 
       <div class="article">
         <p class="section-label">The architectural turning point</p>
@@ -1398,21 +1511,6 @@ curl http://127.0.0.1:48080/v1/chat/completions \
         </p>
       </div>
 
-      <figure>
-        <div class="screenshot-frame">
-          <a href="images/mlx-control-center/model-harness.png">
-            <img src="images/mlx-control-center/model-harness.png" width="1440" height="1000" loading="lazy"
-              alt="MLX Control Center Model Harness with an editable system prompt, generation settings, a user question, streamed local model response, and token-per-second metrics.">
-          </a>
-        </div>
-        <figcaption>
-          The Model Harness uses the same pinned runtime, safety limits, streaming
-          path, usage accounting, and cancellation controls as every other local
-          client. This short 30B-model run produced 46 output tokens at 45.8
-          tokens per second.
-        </figcaption>
-      </figure>
-
       <div class="article">
         <p class="section-label">Benchmarking</p>
         <h2 id="benchmarks">Fast is useful. Comparable is better.</h2>
@@ -1427,26 +1525,13 @@ curl http://127.0.0.1:48080/v1/chat/completions \
 
       </div>
 
-      <figure>
-        <div class="screenshot-frame">
-          <a href="images/mlx-control-center/benchmarks.png">
-            <img src="images/mlx-control-center/benchmarks.png" width="1440" height="1000" loading="lazy"
-              alt="MLX Control Center benchmark statistics comparing nine downloaded models by average generation speed, sample count, prompt speed, best generation speed, and peak memory.">
-          </a>
-        </div>
-        <figcaption>
-          Persisting prompts, settings, and results turns a model collection into
-          a comparison lab instead of a set of anecdotes. In this snapshot,
-          Qwen3 Coder Next 4-bit has the fastest recorded average generation rate.
-        </figcaption>
-      </figure>
-
       <div class="article">
         <div class="note">
           <strong>A benchmark is evidence, not a universal leaderboard.</strong>
-          These figures reflect my machine, model builds, prompts, settings, and
-          saved runs. Quality and tool behavior still need task-specific
-          evaluation; a faster model is not automatically the right model.
+          Results reflect the operator's machine, model builds, prompts,
+          settings, and saved runs. Quality and tool behavior still need
+          task-specific evaluation; a faster model is not automatically the
+          right model.
         </div>
 
         <p>
@@ -1477,19 +1562,36 @@ curl http://127.0.0.1:48080/v1/chat/completions \
         </p>
       </div>
 
-      <figure>
-        <div class="screenshot-frame">
-          <a href="images/mlx-control-center/telemetry.png">
-            <img src="images/mlx-control-center/telemetry.png" width="1440" height="1000" loading="lazy"
-              alt="MLX Control Center telemetry view showing request and token counts, latency, a token activity chart, local client activity, model activity, tool activity, and a short query preview.">
-          </a>
+      <div class="article">
+        <h3>Telemetry became a harness debugger</h3>
+
+        <p>
+          A long-running agent can appear productive while repeatedly calling
+          tools, rebuilding an oversized prompt, or losing the prefix cache that
+          made earlier steps fast. The telemetry service groups related requests
+          by client, model, address, and bounded query preview, then scores the
+          signals that matter together: sustained tool-call chains, repeated
+          tool patterns, context growth, prompt-cache loss, and latency
+          degradation.
+        </p>
+
+        <p>
+          This security-audit run crossed several thresholds at once. OpenCode
+          had completed 29 consecutive tool steps, the context had grown to
+          roughly 87,400 tokens, recent cache reuse had fallen to zero, and
+          recent latency had climbed to more than three minutes. The Control
+          Center raised a high-risk advisory with the evidence and a concrete
+          operator action: review or stop the client, then compact the
+          conversation or start a fresh agent session.
+        </p>
+
+        <div class="note">
+          <strong>The warning is advisory, not an automatic cancellation.</strong>
+          Legitimate repository work can also require long tool chains. A final
+          response without another tool call clears the warning; exact repeated
+          token cycles are handled separately by the generation server.
         </div>
-        <figcaption>
-          The telemetry design keeps operational evidence—volume, tokens,
-          clients, models, latency, errors, tools, and MCP attribution—while
-          deliberately excluding full model conversations and tool arguments.
-        </figcaption>
-      </figure>
+      </div>
 
       <div class="article">
         <div class="security" id="security">
@@ -1501,8 +1603,10 @@ curl http://127.0.0.1:48080/v1/chat/completions \
           </p>
           <ul>
             <li>The API and Control Center bind to loopback by default.</li>
+            <li>The audit MCP is also loopback-only and isolates state by MCP client session.</li>
             <li>Control actions use a fixed allowlist and known downloaded models.</li>
             <li>Remote access needs authentication, authorization, TLS, and a threat model before it should exist.</li>
+            <li>Security testing requires explicit target authorization; access to a model, skill, or tool is not permission to test.</li>
             <li>Model weights, model code, prompt content, tools, and generated actions all remain trust boundaries.</li>
             <li>Tool-capable models require tighter evaluation than chat-only models.</li>
           </ul>
@@ -1521,7 +1625,9 @@ curl http://127.0.0.1:48080/v1/chat/completions \
               <li>Streamed browser harness with cancellation</li>
               <li>Memory admission and retained-cache controls</li>
               <li>Saved benchmarks, aggregate statistics, and HTML reports</li>
-              <li>Bounded request, token, client, tool, and MCP telemetry</li>
+              <li>Bounded request, token, client, tool, MCP, and harness-risk telemetry</li>
+              <li>Loopback MCP security service with 54 auditable assessment tools</li>
+              <li>Paired OpenCode security skills and a global <code>/security-audit</code> workflow</li>
             </ul>
           </div>
           <div>
@@ -1558,6 +1664,9 @@ curl http://127.0.0.1:48080/v1/chat/completions \
             <li><a href="https://github.com/ml-explore/mlx">MLX: an array framework for Apple silicon</a></li>
             <li><a href="https://github.com/ml-explore/mlx-lm">mlx-lm: run language models with MLX</a></li>
             <li><a href="https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/SERVER.md">mlx-lm HTTP model server documentation</a></li>
+            <li><a href="https://opencode.ai/docs/models">OpenCode model configuration</a></li>
+            <li><a href="https://opencode.ai/docs/providers">OpenCode local and custom provider configuration</a></li>
+            <li><a href="https://github.com/ddmitriy78/appsec-audit-mcp">AppSec Audit MCP security-testing toolkit</a></li>
             <li><a href="https://huggingface.co/docs/hub/main/models">Hugging Face model repository documentation</a></li>
             <li><a href="https://huggingface.co/docs/huggingface_hub/guides/download">Hugging Face model download and cache guide</a></li>
           </ul>

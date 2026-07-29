@@ -1,207 +1,183 @@
-# Scripts
+# Helper scripts
 
-Helper scripts for running the local MLX model lab.
-
-## `macos-startup`
-
-Installs per-user macOS LaunchAgents that start the MLX server and Control
-Center at login:
-
-```bash
-scripts/macos-startup install qwen3-coder-next-8bit
-scripts/macos-startup status
-scripts/macos-startup uninstall
-```
-
-The optional model alias controls which model is loaded after the next login.
-The default is `qwen3-coder-next-8bit`. The Control Center is kept alive by
-`launchd`; the MLX service uses the existing `scripts/mlx-server` background
-launcher so model switching and unloading continue to work normally.
+These checkout helpers manage the local MLX server, macOS login startup, and
+OpenCode targets. They resolve models and writable paths through the same
+per-user store as `mlx-lab`; they do not read the capability JSON directly.
 
 ## `mlx-server`
 
-Starts and manages the local OpenAI-compatible MLX server. By default it serves:
-
-`models/Qwen3-Coder-Next-8bit`
-
-Default endpoint:
-
-```text
-http://127.0.0.1:48080/v1
-```
-
-The launcher runs the repo wrapper `mlx_lab.mlx_server`, which keeps MLX
-generation behavior but makes `GET /v1/models` advertise downloaded models from
-`configs/models.json`. Completion requests may use those advertised aliases,
-for example `qwen3-coder-next` or `qwen3-coder-next-8bit`.
-
-## Commands
+Start or inspect the OpenAI-compatible server:
 
 ```bash
 scripts/mlx-server start
-scripts/mlx-server load qwen3-coder-next-8bit
-scripts/mlx-server switch qwen3-coder-next
-scripts/mlx-server unload
-scripts/mlx-server current
 scripts/mlx-server status
+scripts/mlx-server current
 scripts/mlx-server test
 scripts/mlx-server logs
-scripts/mlx-server stop
-scripts/mlx-server restart
-scripts/mlx-server command
+```
+
+Explicitly load, switch, or unload a model:
+
+```bash
+uv run mlx-lab plan-model qwen3-coder-30b-8bit
+scripts/mlx-server load qwen3-coder-30b-8bit
+scripts/mlx-server switch qwen3-coder-next
+scripts/mlx-server unload
+```
+
+Plan the fit before loading a model for the first time. The server's default
+memory reserve scales from 4 to 16 GiB based on detected unified memory, and
+the emergency threshold defaults to half that reserve. The corresponding
+environment variables override those adaptive values.
+
+List capability models with the current user's download status:
+
+```bash
 scripts/mlx-server models
 scripts/mlx-server list
 ```
 
-The same list/status/load/switch/unload flow is available over the local
-control plane API after starting `uv run mlx-lab ui`:
+The launcher delegates alias resolution and model discovery to
+`python -m mlx_lab.cli`. Logs, PID state, telemetry, and runtime state live
+under the user store reported by:
+
+```bash
+uv run mlx-lab path logs
+```
+
+The primary environment overrides are:
+
+```text
+MLX_LAB_HOME
+MLX_SERVER_MODEL
+MLX_SERVER_HOST
+MLX_SERVER_PORT
+MLX_SERVER_START_TIMEOUT
+MLX_SERVER_RUNTIME_STATE
+MLX_SERVER_MODEL_LIST
+MLX_SERVER_ADVERTISE_UNDOWNLOADED
+MLX_SERVER_PIN_MODEL
+MLX_SERVER_PROMPT_CACHE_SIZE
+MLX_SERVER_PROMPT_CACHE_BYTES
+MLX_SERVER_MEMORY_GUARD
+MLX_SERVER_MAX_CONTEXT_TOKENS
+MLX_SERVER_MAX_OUTPUT_TOKENS
+MLX_SERVER_MEMORY_RESERVE_BYTES
+MLX_SERVER_MEMORY_ABORT_BYTES
+MLX_SERVER_TELEMETRY_PATH
+MLX_SERVER_TELEMETRY_MAX_RECORDS
+MLX_SERVER_TELEMETRY_RETENTION_DAYS
+MLX_SERVER_TELEMETRY_QUERY_PREVIEW
+MLX_SERVER_TELEMETRY_PREVIEW_CHARS
+```
+
+The default endpoint is `http://127.0.0.1:48080/v1`.
+When Model API protection is enabled in Control Center, these helpers
+automatically send the shared key. Print it for other local clients with
+`uv run mlx-lab api-key`.
+
+## `macos-startup`
+
+Install per-user LaunchAgents that start the MLX server and Control Center at
+login:
+
+```bash
+scripts/macos-startup install qwen3-coder-30b-8bit
+scripts/macos-startup status
+scripts/macos-startup uninstall
+```
+
+Environment-backed server settings that must survive Control Center restarts
+should be supplied when the services are installed. For example, a 128 GiB Mac
+running Qwen3 Coder 30B with a 128,000-token context can retain the full prompt
+instead of crossing the default 8 GB cache limit:
+
+```bash
+MLX_SERVER_PROMPT_CACHE_BYTES=16GB \
+  scripts/macos-startup install qwen3-coder-30b-8bit
+```
+
+The installer stores the selected prompt-cache byte budget in both
+LaunchAgents. Reinstall the services to change the persistent value.
+
+The optional model is loaded after the next login. The Control Center is kept
+alive by `launchd`; the model server continues to use `mlx-server`, so normal
+load, switch, and unload commands remain authoritative.
+
+Uninstalling login services does not unload a model already held in unified
+memory. Run `scripts/mlx-server unload` separately when desired.
+
+## `opencode-mlx`
+
+Load the desired model first, then launch a configured OpenCode target:
+
+```bash
+scripts/mlx-server load qwen3-coder-30b-8bit
+scripts/opencode-mlx primary
+```
+
+The wrapper reads the shared key from the MLX Lab user store, supplies it to
+OpenCode through `MLX_MODEL_API_KEY`, and selects the repository's
+`opencode.jsonc` through `OPENCODE_CONFIG` even when OpenCode is launched from
+another project. The repository configuration does not contain the secret.
+
+Available targets include:
+
+```text
+primary
+qwen
+qwen-chat
+qwen30
+qwen30-chat
+qwen-coder-next8
+qwen-coder-next8-chat
+qwen-next80
+gemma
+gemma-coder
+deepseek
+deepseek8
+qwen-oblit
+ravenx
+models
+```
+
+OpenCode model definitions remain in `opencode.jsonc`. The server is pinned to
+the explicitly loaded model by default, so select a matching target after
+switching. RavenX is intentionally chat-only: its first OpenCode tool-agent
+benchmark repeated 669 `read` calls in one length-capped response. Keep tools
+disabled until a bounded tool-call evaluation passes.
+
+## Control API
+
+After `uv run mlx-lab ui`, the local Control Center exposes fixed read and
+mutation routes:
 
 ```bash
 curl http://127.0.0.1:8765/api/mlx-server/help
 curl http://127.0.0.1:8765/api/mlx-server/list
 curl http://127.0.0.1:8765/api/mlx-server/status
-curl http://127.0.0.1:8765/api/mlx-server/current
+curl http://127.0.0.1:8765/api/model-statistics
+curl 'http://127.0.0.1:8765/api/telemetry?window_seconds=86400&limit=100'
 curl -X POST http://127.0.0.1:8765/api/mlx-server/load \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3-coder-next-8bit"}'
-curl -X POST http://127.0.0.1:8765/api/mlx-server/cancel \
+  -d '{"model":"qwen3-coder-30b-8bit"}'
+curl -X POST http://127.0.0.1:8765/api/mlx-server/restart \
   -H 'Content-Type: application/json' \
-  -d '{}'
-curl -X POST http://127.0.0.1:8765/api/mlx-server/cache/clear \
-  -H 'Content-Type: application/json' \
-  -d '{}'
+  -d '{"model":"qwen3-coder-30b-8bit"}'
 curl -X POST http://127.0.0.1:8765/api/mlx-server/unload
+curl -X POST http://127.0.0.1:8765/api/control-center/restart
 ```
 
-The control API is intentionally separate from the OpenAI-compatible `/v1`
-model API. It calls this script with whitelisted commands and only loads
-downloaded models registered in `configs/models.json`.
+The control routes accept only known operations and downloaded capability
+models. They are not a general command or HTTP proxy.
 
-## Typical Flow
-
-From the repo root:
-
-```bash
-scripts/mlx-server load qwen3-coder-next-8bit
-scripts/mlx-server test
-```
-
-Then use the model from opencode:
-
-```bash
-scripts/opencode-mlx primary
-```
-
-Or use the launcher that chooses the safe opencode mode for each local model:
-
-```bash
-scripts/opencode-mlx qwen
-scripts/opencode-mlx qwen30
-scripts/opencode-mlx qwen-coder-next8
-scripts/opencode-mlx primary
-scripts/opencode-mlx glm
-scripts/opencode-mlx gemma
-scripts/opencode-mlx deepseek
-scripts/opencode-mlx deepseek8
-```
-
-## Logs And PID
-
-When started by the helper, runtime files are written under:
-
-```text
-logs/mlx-server.log
-logs/mlx-server.pid
-```
-
-`logs/` is ignored by git.
-
-## Environment Overrides
-
-Use a different host or port:
-
-```bash
-MLX_SERVER_PORT=48081 scripts/mlx-server start
-MLX_SERVER_PORT=48081 scripts/mlx-server status
-```
-
-Serve the fast fallback Qwen Coder model:
-
-```bash
-scripts/mlx-server load qwen3-coder-next
-opencode -m local-mlx/qwen3-coder-next
-```
-
-Serve the primary Qwen3 Coder Next 8-bit model:
-
-```bash
-scripts/mlx-server load qwen3-coder-next-8bit
-opencode -m local-mlx/qwen3-coder-next-8bit
-```
-
-Serve the downloaded Qwen3 Coder 30B 8-bit model:
-
-```bash
-scripts/mlx-server load qwen3-coder-30b-8bit
-opencode -m local-mlx/qwen3-coder-30b-8bit
-```
-
-Serve another configured local or hosted model:
-
-```bash
-scripts/mlx-server models
-scripts/mlx-server load qwen3-6-27b-obliterated
-```
-
-The workspace also defines chat-only agents for the other comparison models:
-
-```bash
-opencode --agent qwen-chat
-opencode --agent qwen30-chat
-opencode --agent qwen-coder-next8-chat
-opencode --agent gemma-chat
-opencode --agent deepseek-chat
-opencode --agent deepseek8-chat
-opencode --agent qwen-oblit-chat
-```
-
-Use Qwen Coder explicitly for the opencode Build/tool workflow:
-
-```bash
-opencode -m local-mlx/qwen3-coder-next
-opencode -m local-mlx/qwen3-coder-next-8bit
-opencode -m local-mlx/qwen3-coder-30b-8bit
-```
-
-`mlx_lm.server` serves one loaded model process at a time. Use
-`scripts/mlx-server load <alias>` or `scripts/mlx-server switch <alias>` to
-restart the server with exactly one model in memory. Use
-`scripts/mlx-server unload` when you are done or before running memory-heavy
-benchmarks or LM Studio multimodal work.
-
-If you change the port, also update any clients that point at the server, such as opencode, Continue, or Cline.
-
-Set `MLX_SERVER_MODEL_LIST=runtime` when you need raw upstream `mlx_lm.server`
-model discovery instead of the configured workspace registry.
-Set `MLX_SERVER_ADVERTISE_UNDOWNLOADED=1` to include configured models that are
-not present under `models/` yet.
-
-The managed wrapper enforces a combined prompt/output context cap and estimates
-active KV-cache memory before prefill. It reserves 16 GB of available memory by
-default, clears retained caches under that threshold, and cancels active
-requests below 8 GB. Configure the next server process with:
-
-```bash
-MLX_SERVER_MAX_CONTEXT_TOKENS=128000 \
-MLX_SERVER_MAX_OUTPUT_TOKENS=32000 \
-MLX_SERVER_MEMORY_RESERVE_BYTES=16GB \
-MLX_SERVER_MEMORY_ABORT_BYTES=8GB \
-  scripts/mlx-server load qwen3-coder-30b-8bit
-```
-
-The same settings can be changed for the current process from the control
-center. In-memory changes reset to the environment defaults after a restart.
-
-## Notes
-
-Keep the server bound to `127.0.0.1` for local use. `mlx_lm.server` is intended for local development and basic testing, not as an internet-facing production service.
+The telemetry response includes `agent_loop_risks`, an advisory list of
+possible long-running agent loops. Each item reports the risk level and score,
+consecutive tool steps, context and cache behavior, latency, evidence signals,
+and a recommended operator action. Detection uses the existing
+privacy-bounded telemetry fields and does not cancel a request based on the
+agent-loop score. The separate server-side repetition guard does stop exact
+token cycles and reports the reason to streaming clients. The response also
+includes `failure_types` and `error_events` so the Control Center can show the
+classified failure, client/address, endpoint, model, retained error message,
+bounded query preview, and request ID behind every amber chart bucket.

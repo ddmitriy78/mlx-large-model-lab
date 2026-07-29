@@ -4,6 +4,15 @@ version = "0.1.0"
 description = "A local MLX lab for running and benchmarking large coding and reasoning models on Apple Silicon."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+keywords = ["apple-silicon", "local-llm", "mlx", "mlx-lm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   "huggingface-hub[hf-xet]>=0.34.0",
   "mlx-lm>=0.27.0",
@@ -14,6 +23,11 @@ dependencies = [
 [project.scripts]
 mlx-lab = "mlx_lab.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/ddmitriy78/mlx-large-model-lab"
+Issues = "https://github.com/ddmitriy78/mlx-large-model-lab/issues"
+Repository = "https://github.com/ddmitriy78/mlx-large-model-lab"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -23,3 +37,7 @@ package = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mlx_lab"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"configs/models.json" = "mlx_lab/data/model_capabilities.json"
+"prompts/first_model.jsonl" = "mlx_lab/data/prompts/first_model.jsonl"

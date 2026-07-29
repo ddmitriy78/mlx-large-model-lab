@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "local-mlx/qwen3-coder-next-8bit",
-  "small_model": "local-mlx/qwen3-coder-next",
+  "model": "local-mlx/qwen3-coder-30b-8bit",
+  "small_model": "local-mlx/active-small",
   "agent": {
     "qwen-chat": {
       "description": "Chat-only Qwen Coder without opencode tool access.",
@@ -190,6 +190,19 @@
         "todowrite": false,
         "skill": false
       }
+    },
+    "ravenx-chat": {
+      "description": "Chat-only RavenX cybersecurity model pending safe tool-call behavior.",
+      "model": "local-mlx/ravenx-cyberagent",
+      "mode": "primary",
+      "maxSteps": 1,
+      "prompt": "You are running as a chat-only local cybersecurity model. Answer directly in normal text. Do not call tools, do not emit XML tool_call blocks, and do not mention unavailable tools. Treat security findings and commands as proposals that require independent validation.",
+      "permission": {
+        "*": "deny"
+      },
+      "tools": {
+        "*": false
+      }
     }
   },
   "provider": {
@@ -198,13 +211,23 @@
       "name": "Local MLX",
       "options": {
         "baseURL": "http://127.0.0.1:48080/v1",
-        "apiKey": "local-mlx",
+        "apiKey": "{env:MLX_MODEL_API_KEY}",
         "timeout": 1800000,
         "chunkTimeout": 600000
       },
       "models": {
+        "active-small": {
+          "id": "default_model",
+          "name": "Active pinned MLX model for background tasks",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 128000,
+            "output": 256
+          }
+        },
         "qwen3-coder-next": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Coder-Next-4bit",
+          "id": "qwen3-coder-next",
           "name": "Qwen3 Coder Next 4-bit MLX",
           "tool_call": true,
           "temperature": true,
@@ -214,7 +237,7 @@
           }
         },
         "qwen3-coder-30b-8bit": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Coder-30B-A3B-Instruct-8bit",
+          "id": "qwen3-coder-30b-8bit",
           "name": "Qwen3 Coder 30B A3B Instruct 8-bit MLX",
           "tool_call": true,
           "temperature": true,
@@ -224,7 +247,7 @@
           }
         },
         "qwen3-coder-next-8bit": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Coder-Next-8bit",
+          "id": "qwen3-coder-next-8bit",
           "name": "Qwen3 Coder Next 8-bit MLX",
           "tool_call": true,
           "temperature": true,
@@ -234,7 +257,7 @@
           }
         },
         "qwen3-next-80b-8bit": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3-Next-80B-A3B-Instruct-8bit",
+          "id": "qwen3-next-80b-8bit",
           "name": "Qwen3 Next 80B A3B Instruct 8-bit MLX",
           "tool_call": false,
           "temperature": true,
@@ -244,7 +267,7 @@
           }
         },
         "gemma-4-31b-it-optiq": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/gemma-4-31B-it-OptiQ-4bit",
+          "id": "gemma-4-31b-it-optiq",
           "name": "Gemma 4 31B IT OptiQ 4-bit MLX",
           "tool_call": false,
           "temperature": true,
@@ -254,7 +277,7 @@
           }
         },
         "gemma-4-12b-coder-8bit": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/Gemma-4-12B-Coder-Fable5-Composer2.5-8bit",
+          "id": "gemma-4-12b-coder-8bit",
           "name": "Gemma 4 12B Coder Fable5 Composer 2.5 8-bit MLX",
           "tool_call": true,
           "temperature": true,
@@ -264,7 +287,7 @@
           }
         },
         "qwen3-6-27b-obliterated": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/Qwen3.6-27B-OBLITERATED-MLX-4bit",
+          "id": "qwen3-6-27b-obliterated",
           "name": "Qwen3.6 27B Obliterated 4-bit MLX",
           "tool_call": false,
           "temperature": true,
@@ -273,8 +296,18 @@
             "output": 4096
           }
         },
+        "ravenx-cyberagent": {
+          "id": "ravenx-cyberagent",
+          "name": "RavenX CyberAgent Qwen3.6 35B A3B MLX",
+          "tool_call": false,
+          "temperature": true,
+          "limit": {
+            "context": 128000,
+            "output": 4096
+          }
+        },
         "deepseek-r1-qwen-32b": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/DeepSeek-R1-Distill-Qwen-32B-4bit",
+          "id": "deepseek-r1-qwen-32b",
           "name": "DeepSeek R1 Distill Qwen 32B 4-bit MLX",
           "tool_call": false,
           "temperature": true,
@@ -284,7 +317,7 @@
           }
         },
         "deepseek-r1-qwen-32b-8bit": {
-          "id": "/Users/dima/AI_ML/mlx_01/models/DeepSeek-R1-Distill-Qwen-32B-MLX-8Bit",
+          "id": "deepseek-r1-qwen-32b-8bit",
           "name": "DeepSeek R1 Distill Qwen 32B 8-bit MLX",
           "tool_call": false,
           "temperature": true,

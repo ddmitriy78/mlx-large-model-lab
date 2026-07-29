@@ -4,14 +4,27 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 MLX_SERVER_SCRIPT="$ROOT_DIR/scripts/mlx-server"
-LOG_DIR="$ROOT_DIR/logs"
+if [[ -x "$PYTHON_BIN" ]]; then
+  LOG_DIR="$("$PYTHON_BIN" -m mlx_lab.cli path logs)"
+else
+  LOG_DIR="$ROOT_DIR/logs"
+fi
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
-SERVER_LABEL="com.dima.mlx-lab.server"
-CONTROL_CENTER_LABEL="com.dima.mlx-lab.control-center"
+SERVER_LABEL="io.github.mlx-large-model-lab.server"
+CONTROL_CENTER_LABEL="io.github.mlx-large-model-lab.control-center"
 SERVER_PLIST="$LAUNCH_AGENTS_DIR/$SERVER_LABEL.plist"
 CONTROL_CENTER_PLIST="$LAUNCH_AGENTS_DIR/$CONTROL_CENTER_LABEL.plist"
-DEFAULT_MODEL="qwen3-coder-next-8bit"
+DEFAULT_MODEL="qwen3-coder-30b-8bit"
+PROMPT_CACHE_BYTES="${MLX_SERVER_PROMPT_CACHE_BYTES:-8GB}"
+SHARED_API_KEY=""
+CURL_AUTH_ARGS=()
+if [[ -x "$PYTHON_BIN" ]]; then
+  SHARED_API_KEY="$("$PYTHON_BIN" -m mlx_lab.cli api-key --if-configured)"
+fi
+if [[ -n "$SHARED_API_KEY" ]]; then
+  CURL_AUTH_ARGS=(-H "Authorization: Bearer $SHARED_API_KEY")
+fi
 
 usage() {
   cat <<'EOF'
@@ -23,8 +36,11 @@ Commands:
   status           Show registration and HTTP status for both services
 
 The optional model is the alias loaded after the next login. It defaults to
-qwen3-coder-next-8bit. Uninstalling does not unload the model currently in
+qwen3-coder-30b-8bit. Uninstalling does not unload the model currently in
 memory; use scripts/mlx-server unload when that is also desired.
+
+The current MLX_SERVER_PROMPT_CACHE_BYTES value is saved in both login
+services so Control Center model-server restarts keep the same cache budget.
 EOF
 }
 
@@ -53,7 +69,8 @@ write_plists() {
     "$MLX_SERVER_SCRIPT" \
     "$PYTHON_BIN" \
     "$LOG_DIR" \
-    "$model" <<'PY'
+    "$model" \
+    "$PROMPT_CACHE_BYTES" <<'PY'
 import plistlib
 import sys
 from pathlib import Path
@@ -68,6 +85,7 @@ from pathlib import Path
     python_bin,
     log_dir,
     model,
+    prompt_cache_bytes,
 ) = sys.argv[1:]
 
 path_value = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -75,7 +93,10 @@ common = {
     "WorkingDirectory": root_dir,
     "RunAtLoad": True,
     "ProcessType": "Background",
-    "EnvironmentVariables": {"PATH": path_value},
+    "EnvironmentVariables": {
+        "PATH": path_value,
+        "MLX_SERVER_PROMPT_CACHE_BYTES": prompt_cache_bytes,
+    },
 }
 server = {
     **common,
@@ -162,7 +183,7 @@ http_status() {
   local name="$1"
   local url="$2"
 
-  if curl -fsS "$url" >/dev/null 2>&1; then
+  if curl -fsS "${CURL_AUTH_ARGS[@]}" "$url" >/dev/null 2>&1; then
     echo "$name HTTP: ready ($url)"
   else
     echo "$name HTTP: unavailable ($url)"

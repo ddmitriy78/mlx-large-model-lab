@@ -2,6 +2,12 @@
 .python-version
 __pycache__/
 *.py[cod]
+*.egg-info/
+dist/
+build/
+.coverage
+.pytest_cache/
+.private/
 
 # Large local assets and generated experiment output.
 models/

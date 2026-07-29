@@ -15,15 +15,43 @@ from pathlib import Path
 from typing import Any
 
 import psutil
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from rich import box
 from rich.console import Console
 from rich.table import Table
 
-ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = ROOT / "configs" / "models.json"
-PROMPT_PATH = ROOT / "prompts" / "first_model.jsonl"
-RUNS_DIR = ROOT / "runs"
+from .model_sizing import (
+    GB,
+    GIB,
+    build_memory_plan,
+    model_memory_profile,
+    recommended_abort_threshold_bytes,
+    recommended_memory_reserve_bytes,
+)
+from .user_store import (
+    capabilities_path,
+    control_center_settings,
+    merged_config,
+    model_is_present,
+    project_root,
+    register_model_path,
+    sync_user_store,
+    user_paths,
+)
+
+ROOT = project_root()
+CONFIG_PATH = capabilities_path()
+SOURCE_PROMPTS_DIR = ROOT / "prompts"
+PROMPTS_DIR = (
+    SOURCE_PROMPTS_DIR
+    if SOURCE_PROMPTS_DIR.is_dir()
+    else Path(__file__).resolve().parent / "data" / "prompts"
+)
+PROMPT_PATH = PROMPTS_DIR / "first_model.jsonl"
+USER_PATHS = user_paths()
+RUNS_DIR = USER_PATHS.runs
+LOGS_DIR = USER_PATHS.logs
+CACHE_DIR = USER_PATHS.cache
 
 SYSTEM_PROMPT = (
     "You are a local coding and defensive cybersecurity assistant. "
@@ -34,8 +62,7 @@ console = Console()
 
 
 def load_config() -> dict[str, Any]:
-    with CONFIG_PATH.open("r", encoding="utf-8") as file:
-        return json.load(file)
+    return merged_config()
 
 
 def first_model_config() -> dict[str, Any]:
@@ -58,7 +85,8 @@ def configured_benchmark_sets() -> dict[str, list[str]]:
 
 
 def model_path(model: dict[str, Any]) -> Path:
-    return ROOT / model["local_dir"]
+    path = Path(model["local_dir"]).expanduser()
+    return path if path.is_absolute() else ROOT / path
 
 
 def model_is_downloaded(model: dict[str, Any]) -> bool:
@@ -222,6 +250,18 @@ def workspace_path(path_value: str | Path) -> Path:
     if path.is_absolute():
         return path
     return ROOT / path
+
+
+def run_store_path(path_value: str | Path) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path
+    parts = path.parts[1:] if path.parts[:1] == ("runs",) else path.parts
+    user_path = RUNS_DIR.joinpath(*parts)
+    legacy_path = ROOT / path
+    if legacy_path.exists() and not user_path.exists():
+        return legacy_path
+    return user_path
 
 
 def safe_slug(value: str) -> str:
@@ -821,7 +861,7 @@ def generate_with_loaded_model(
 def command_info(_: argparse.Namespace) -> None:
     model = first_model_config()
     local = model_path(model)
-    disk = shutil.disk_usage(ROOT)
+    disk = shutil.disk_usage(USER_PATHS.root)
     memory_bytes = psutil.virtual_memory().total
 
     table = Table(title="MLX Large Model Lab")
@@ -838,23 +878,255 @@ def command_info(_: argparse.Namespace) -> None:
     table.add_row("Expected model size", f"{model['estimated_size_gb']} GB")
     table.add_row("Local model path", str(local))
     table.add_row("Downloaded", "yes" if model_is_downloaded(model) else "no")
+    table.add_row("Capabilities", str(CONFIG_PATH))
+    table.add_row("User configuration", str(USER_PATHS.config))
+    table.add_row("User store", str(USER_PATHS.root))
     console.print(table)
 
 
+def selected_configured_model(
+    model_input: str | None,
+) -> tuple[str, dict[str, Any]]:
+    config = load_config()
+    if not model_input:
+        key = config["first_model"]
+        return key, config["models"][key]
+    matched = find_configured_model(model_input)
+    if matched:
+        return matched
+    raise SystemExit(
+        f"Unknown model capability: {model_input}. "
+        "Run `uv run mlx-lab models` to list supported models."
+    )
+
+
+def repository_download_sizes(
+    repo_id: str,
+) -> tuple[int, int, int]:
+    files = snapshot_download(
+        repo_id=repo_id,
+        cache_dir=CACHE_DIR / "huggingface",
+        dry_run=True,
+    )
+    total_bytes = sum(int(item.file_size or 0) for item in files)
+    weight_bytes = sum(
+        int(item.file_size or 0)
+        for item in files
+        if str(getattr(item, "filename", "")).endswith(".safetensors")
+    )
+    return len(files), total_bytes, weight_bytes or total_bytes
+
+
+def format_gib(value: int) -> str:
+    return f"{value / GIB:.1f} GiB"
+
+
+def format_gb(value: int) -> str:
+    return f"{value / GB:.1f} GB"
+
+
+def command_plan_model(args: argparse.Namespace) -> None:
+    key, model = selected_configured_model(args.model)
+    local = model_path(model)
+    downloaded = model_is_downloaded(model)
+    memory = psutil.virtual_memory()
+    simulated_memory = args.memory_gib is not None
+    total_memory_bytes = (
+        int(args.memory_gib * GIB)
+        if simulated_memory
+        else int(memory.total)
+    )
+    if total_memory_bytes <= 0:
+        raise SystemExit("--memory-gib must be greater than zero.")
+    available_memory_bytes = (
+        total_memory_bytes if simulated_memory else int(memory.available)
+    )
+
+    reserve_bytes = (
+        int(args.reserve_gib * GIB)
+        if args.reserve_gib is not None
+        else recommended_memory_reserve_bytes(total_memory_bytes)
+    )
+    if reserve_bytes < 4 * GIB:
+        raise SystemExit("--reserve-gib must be at least 4.")
+    if args.context_tokens <= 0:
+        raise SystemExit("--context-tokens must be greater than zero.")
+
+    estimated_bytes = int(float(model["estimated_size_gb"]) * GB)
+    file_count: int | None = None
+    repository_bytes = estimated_bytes
+    weight_bytes = estimated_bytes
+    size_source = "capability catalog estimate"
+    config_ref: str | Path | None = local if (local / "config.json").is_file() else None
+
+    if not args.catalog_only:
+        try:
+            file_count, repository_bytes, weight_bytes = repository_download_sizes(
+                model["repo_id"]
+            )
+            size_source = "Hugging Face repository metadata"
+        except Exception as exc:
+            raise SystemExit(
+                "Could not inspect the Hugging Face repository. Check network "
+                "access or rerun with --catalog-only. "
+                f"Details: {exc}"
+            ) from exc
+        if config_ref is None:
+            try:
+                config_ref = hf_hub_download(
+                    repo_id=model["repo_id"],
+                    filename="config.json",
+                    cache_dir=CACHE_DIR / "huggingface",
+                )
+            except Exception:
+                config_ref = None
+
+    profile = model_memory_profile(config_ref)
+    disk = shutil.disk_usage(USER_PATHS.root)
+    plan = build_memory_plan(
+        model_weight_bytes=weight_bytes,
+        download_bytes=0 if downloaded else repository_bytes,
+        total_memory_bytes=total_memory_bytes,
+        available_memory_bytes=available_memory_bytes,
+        disk_free_bytes=int(disk.free),
+        context_tokens=args.context_tokens,
+        kv_bytes_per_token=int(profile["kv_bytes_per_token"]),
+        reserve_bytes=reserve_bytes,
+        model_context_tokens=int(profile["model_context_tokens"]),
+    )
+    abort_bytes = recommended_abort_threshold_bytes(reserve_bytes)
+    plan.update(
+        {
+            "model_key": key,
+            "model_alias": model_label(key, model),
+            "repo_id": model["repo_id"],
+            "downloaded": downloaded,
+            "repository_bytes": repository_bytes,
+            "repository_file_count": file_count,
+            "size_source": size_source,
+            "kv_estimate_source": profile["kv_estimate_source"],
+            "simulated_memory": simulated_memory,
+            "recommended_abort_bytes": abort_bytes,
+        }
+    )
+
+    if args.json:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return
+
+    verdict_color = {
+        "safe": "green",
+        "caution": "yellow",
+        "unsafe": "red",
+    }[plan["verdict"]]
+    table = Table(title=f"Model Fit Plan: {model_label(key, model)}")
+    table.add_column("Item")
+    table.add_column("Estimate")
+    table.add_row("Verdict", f"[{verdict_color}]{plan['verdict'].upper()}[/{verdict_color}]")
+    table.add_row("Repository", model["repo_id"])
+    table.add_row(
+        "Repository download",
+        (
+            f"{format_gb(repository_bytes)} across {file_count} files"
+            if file_count is not None
+            else f"{format_gb(repository_bytes)} ({size_source})"
+        ),
+    )
+    table.add_row(
+        "Download needed",
+        "no; model is already present"
+        if downloaded
+        else f"yes; allow {format_gb(plan['disk_required_bytes'])} with buffer",
+    )
+    table.add_row(
+        "Unified memory",
+        f"{format_gib(total_memory_bytes)}"
+        + (" (simulated)" if simulated_memory else " (detected)"),
+    )
+    if not simulated_memory:
+        table.add_row(
+            "Available now",
+            format_gib(available_memory_bytes),
+        )
+    table.add_row("Estimated weights", format_gib(weight_bytes))
+    table.add_row(
+        f"KV cache at {args.context_tokens:,} tokens",
+        f"{format_gib(plan['kv_cache_bytes'])} ({profile['kv_estimate_source']})",
+    )
+    table.add_row(
+        "Runtime overhead allowance",
+        format_gib(plan["runtime_overhead_bytes"]),
+    )
+    table.add_row("Safety reserve", format_gib(reserve_bytes))
+    table.add_row(
+        "Estimated memory with reserve",
+        format_gib(plan["recommended_memory_bytes"]),
+    )
+    table.add_row("Disk free", format_gb(int(disk.free)))
+    if profile["model_context_tokens"]:
+        table.add_row(
+            "Advertised model context",
+            f"{int(profile['model_context_tokens']):,} tokens",
+        )
+    console.print(table)
+
+    console.print("\n[bold]Recommended next steps[/bold]")
+    if plan["verdict"] == "unsafe":
+        console.print(
+            "- [red]Do not load this model with these settings.[/red] "
+            "Choose a smaller model or reduce the context target."
+        )
+        console.print("- Compare alternatives with `uv run mlx-lab models`.")
+    elif plan["verdict"] == "caution":
+        if not plan["current_memory_fit"] and not simulated_memory:
+            console.print(
+                "- Close memory-intensive applications before loading the model."
+            )
+        if not plan["disk_fit"]:
+            console.print("- Free disk space before downloading the model.")
+    else:
+        console.print("- The model fits the selected planning envelope.")
+    if args.catalog_only:
+        console.print(
+            "- Rerun without `--catalog-only` to verify the repository's "
+            "current file sizes."
+        )
+    console.print(
+        f"- Download check: `uv run mlx-lab download --model "
+        f"{model_label(key, model)} --dry-run`"
+    )
+    console.print(
+        f"- Download: `uv run mlx-lab download --model "
+        f"{model_label(key, model)}`"
+    )
+    console.print(
+        "- Load only one large model at a time and use "
+        "`scripts/mlx-server unload` when finished."
+    )
+    console.print(
+        f"- Keep the memory guard enabled; this plan recommends about "
+        f"{reserve_bytes / GIB:.0f} GiB reserve and "
+        f"{abort_bytes / GIB:.0f} GiB emergency-abort headroom."
+    )
+    console.print(
+        "- Treat this as a conservative planning estimate. Validate actual peak "
+        "memory in the Control Center before increasing context or output limits."
+    )
+
+
 def command_download(args: argparse.Namespace) -> None:
-    model = first_model_config()
+    key, model = selected_configured_model(args.model)
     local = model_path(model)
     if args.dry_run:
-        files = snapshot_download(
-            repo_id=model["repo_id"],
-            cache_dir=ROOT / ".hf-cache",
-            dry_run=True,
-        )
-        total = sum(item.file_size or 0 for item in files)
+        file_count, total, _ = repository_download_sizes(model["repo_id"])
         console.print(f"[bold]Repo:[/bold] {model['repo_id']}")
-        console.print(f"[bold]Files:[/bold] {len(files)}")
+        console.print(f"[bold]Files:[/bold] {file_count}")
         console.print(f"[bold]Would download:[/bold] {total / 1e9:.1f} GB")
         console.print(f"[bold]Destination:[/bold] {local}")
+        console.print(
+            "[bold]Memory plan:[/bold] "
+            f"uv run mlx-lab plan-model {model_label(key, model)}"
+        )
         return
 
     console.print(f"[bold]Downloading:[/bold] {model['repo_id']}")
@@ -862,9 +1134,112 @@ def command_download(args: argparse.Namespace) -> None:
     snapshot_download(
         repo_id=model["repo_id"],
         local_dir=local,
-        cache_dir=ROOT / ".hf-cache",
+        cache_dir=CACHE_DIR / "huggingface",
     )
+    register_model_path(key, local)
     console.print("[green]Download complete.[/green]")
+
+
+def command_config(_: argparse.Namespace) -> None:
+    config = sync_user_store()
+    console.print(f"[bold]Capabilities:[/bold] {CONFIG_PATH}")
+    console.print(f"[bold]User configuration:[/bold] {USER_PATHS.config}")
+    console.print_json(data=config)
+
+
+def command_models(args: argparse.Namespace) -> None:
+    rows = []
+    for key, model in configured_models():
+        local = model_path(model)
+        downloaded = model_is_downloaded(model)
+        aliases = ", ".join(model.get("aliases", [])) or "-"
+        ref = str(local) if downloaded else model["repo_id"]
+        if args.plain:
+            rows.append(
+                "\t".join(
+                    (
+                        key,
+                        "local" if downloaded else "hosted",
+                        aliases,
+                        ref,
+                    )
+                )
+            )
+            continue
+
+        rows.append(
+            (
+                model_label(key, model),
+                "yes" if downloaded else "no",
+                f"{float(model['estimated_size_gb']):.1f}",
+                str(model.get("role") or "-"),
+            )
+        )
+
+    if args.plain:
+        print("\n".join(rows))
+        return
+
+    table = Table(title="MLX model capabilities")
+    table.add_column("Model")
+    table.add_column("Downloaded")
+    table.add_column("Estimated GB", justify="right")
+    table.add_column("Role")
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
+
+
+def command_register_model(args: argparse.Namespace) -> None:
+    matched = find_configured_model(args.model)
+    if not matched:
+        raise SystemExit(f"Unknown model capability: {args.model}")
+    key, model = matched
+    local = Path(args.local_dir).expanduser().resolve()
+    if not model_is_present(local):
+        raise SystemExit(
+            f"No complete MLX model found at {local}; expected config.json and "
+            "*.safetensors files."
+        )
+    register_model_path(key, local)
+    console.print(
+        f"[green]Registered {model_label(key, model)}:[/green] {local}"
+    )
+
+
+def command_resolve_model(args: argparse.Namespace) -> None:
+    matched = find_configured_model(args.model)
+    if not matched:
+        value = (
+            str(Path(args.model).expanduser())
+            if args.model.startswith("~")
+            else args.model
+        )
+        print(value)
+        return
+    _, model = matched
+    print(model_path(model) if model_is_downloaded(model) else model["repo_id"])
+
+
+def command_path(args: argparse.Namespace) -> None:
+    paths = {
+        "root": USER_PATHS.root,
+        "config": USER_PATHS.config,
+        "models": USER_PATHS.models,
+        "cache": USER_PATHS.cache,
+        "runs": USER_PATHS.runs,
+        "logs": USER_PATHS.logs,
+        "capabilities": CONFIG_PATH,
+        "project": ROOT,
+    }
+    print(paths[args.name])
+
+
+def command_api_key(args: argparse.Namespace) -> None:
+    settings = control_center_settings()
+    if args.if_configured and not settings["api_key_configured"]:
+        return
+    print(control_center_settings(include_secret=True)["api_key"])
 
 
 def command_generate(args: argparse.Namespace) -> None:
@@ -899,7 +1274,11 @@ def command_benchmark(args: argparse.Namespace) -> None:
         run_label = "benchmark"
     run_path = RUNS_DIR / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{run_label}.jsonl"
     report_path = run_path.with_suffix(".html")
-    output_dir = workspace_path(args.output_dir) / run_path.stem if args.output_dir else None
+    output_dir = (
+        run_store_path(args.output_dir) / run_path.stem
+        if args.output_dir
+        else None
+    )
     completed_keys = completed_benchmark_keys() if args.skip_completed else set()
 
     console.print(f"[bold]Benchmark models:[/bold] {len(targets)}")
@@ -1164,7 +1543,7 @@ def command_benchmark(args: argparse.Namespace) -> None:
 
 
 def command_report(args: argparse.Namespace) -> None:
-    run_path = Path(args.jsonl_path)
+    run_path = run_store_path(args.jsonl_path)
     records = read_benchmark_records(run_path)
     if not records:
         raise SystemExit(f"No benchmark records found in {run_path}")
@@ -1212,7 +1591,117 @@ def build_parser() -> argparse.ArgumentParser:
     info = subparsers.add_parser("info", help="Show local lab and model status")
     info.set_defaults(func=command_info)
 
-    download = subparsers.add_parser("download", help="Download the primary model")
+    config = subparsers.add_parser(
+        "config",
+        help="Show the per-user configuration and immutable capability path",
+    )
+    config.set_defaults(func=command_config)
+
+    models = subparsers.add_parser(
+        "models",
+        help="List model capabilities and per-user download status",
+    )
+    models.add_argument(
+        "--plain",
+        action="store_true",
+        help="Print tab-separated rows for scripts",
+    )
+    models.set_defaults(func=command_models)
+
+    register_model = subparsers.add_parser(
+        "register-model",
+        help="Associate a downloaded model directory with a capability",
+    )
+    register_model.add_argument("model", help="Capability key, alias, or repo id")
+    register_model.add_argument("local_dir", help="Downloaded MLX model directory")
+    register_model.set_defaults(func=command_register_model)
+
+    resolve_model = subparsers.add_parser(
+        "resolve-model",
+        help="Resolve a model key or alias to its local path or hosted repo id",
+    )
+    resolve_model.add_argument("model")
+    resolve_model.set_defaults(func=command_resolve_model)
+
+    path = subparsers.add_parser(
+        "path",
+        help="Print one MLX Lab project or per-user path",
+    )
+    path.add_argument(
+        "name",
+        choices=(
+            "root",
+            "config",
+            "models",
+            "cache",
+            "runs",
+            "logs",
+            "capabilities",
+            "project",
+        ),
+    )
+    path.set_defaults(func=command_path)
+
+    api_key = subparsers.add_parser(
+        "api-key",
+        help="Print the shared Control Center and Model API key",
+    )
+    api_key.add_argument(
+        "--if-configured",
+        action="store_true",
+        help="Print nothing instead of creating a key when none is configured",
+    )
+    api_key.set_defaults(func=command_api_key)
+
+    plan_model = subparsers.add_parser(
+        "plan-model",
+        help="Estimate whether a configured model fits this Mac safely",
+    )
+    plan_model.add_argument(
+        "model",
+        nargs="?",
+        default=None,
+        help="Capability key, alias, or repo id; defaults to the preferred model",
+    )
+    plan_model.add_argument(
+        "--context-tokens",
+        type=int,
+        default=8_192,
+        help="Total prompt-plus-output context to budget (default: 8192)",
+    )
+    plan_model.add_argument(
+        "--memory-gib",
+        type=float,
+        default=None,
+        help="Simulate a Mac memory size instead of using detected unified memory",
+    )
+    plan_model.add_argument(
+        "--reserve-gib",
+        type=float,
+        default=None,
+        help="Override the adaptive safety reserve (minimum: 4 GiB)",
+    )
+    plan_model.add_argument(
+        "--catalog-only",
+        action="store_true",
+        help="Use catalog estimates without querying Hugging Face",
+    )
+    plan_model.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the sizing plan as JSON",
+    )
+    plan_model.set_defaults(func=command_plan_model)
+
+    download = subparsers.add_parser(
+        "download",
+        help="Download a configured model",
+    )
+    download.add_argument(
+        "--model",
+        default=None,
+        help="Capability key, alias, or repo id; defaults to the preferred model",
+    )
     download.add_argument(
         "--dry-run",
         action="store_true",
@@ -1241,24 +1730,24 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_model.add_argument(
         "--all-models",
         action="store_true",
-        help="Benchmark every downloaded model configured in configs/models.json",
+        help="Benchmark every downloaded model in the capability catalog",
     )
     benchmark_model.add_argument(
         "--model-set",
         choices=sorted(configured_benchmark_sets()),
         default=None,
-        help="Benchmark a configured model set from configs/models.json",
+        help="Benchmark a configured model set from the capability catalog",
     )
     benchmark.add_argument("--limit", type=int, default=None)
     benchmark.add_argument(
         "--prompts",
-        default=str(PROMPT_PATH.relative_to(ROOT)),
+        default=str(PROMPT_PATH),
         help="Prompt JSONL path",
     )
     benchmark.add_argument(
         "--output-dir",
         default=None,
-        help="Write each model/prompt output as Markdown under this directory",
+        help="Write Markdown outputs under this user-run-store directory",
     )
     benchmark.add_argument("--max-tokens", type=int, default=512)
     benchmark.add_argument("--temp", type=float, default=0.0)
@@ -1270,7 +1759,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument(
         "--skip-completed",
         action="store_true",
-        help="Skip model/prompt/settings rows already present in runs/*.jsonl",
+        help="Skip model/prompt/settings rows already present in the user run store",
     )
     benchmark.set_defaults(func=command_benchmark)
 
@@ -1278,7 +1767,7 @@ def build_parser() -> argparse.ArgumentParser:
         "report",
         help="Write an HTML report from a benchmark JSONL file",
     )
-    report.add_argument("jsonl_path", help="Benchmark JSONL file in runs/")
+    report.add_argument("jsonl_path", help="Benchmark JSONL file in the user run store")
     report.add_argument("--output", default=None, help="Override HTML output path")
     report.set_defaults(func=command_report)
 
@@ -1286,8 +1775,17 @@ def build_parser() -> argparse.ArgumentParser:
         "ui",
         help="Start the local benchmark control plane",
     )
-    ui.add_argument("--host", default="127.0.0.1")
-    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument(
+        "--host",
+        default=None,
+        help="Override the configured Control Center bind address",
+    )
+    ui.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Override the configured Control Center port",
+    )
     ui.set_defaults(func=command_ui)
 
     serve_command = subparsers.add_parser(
@@ -1302,6 +1800,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    sync_user_store()
     args.func(args)
 
 

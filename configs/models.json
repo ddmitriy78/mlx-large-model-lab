@@ -1,5 +1,5 @@
 {
-  "first_model": "qwen3_coder_next_8bit",
+  "first_model": "qwen3_coder_30b_a3b_instruct_8bit",
   "models": {
     "qwen3_coder_next_4bit": {
       "repo_id": "mlx-community/Qwen3-Coder-Next-4bit",
@@ -7,7 +7,6 @@
         "qwen3-coder-next",
         "qwen3-coder-next-4bit"
       ],
-      "local_dir": "models/Qwen3-Coder-Next-4bit",
       "estimated_size_gb": 44.9,
       "role": "Fast fallback model",
       "notes": "Fast local fallback for lower-latency coding, defensive cybersecurity review, and benchmark learning."
@@ -18,10 +17,9 @@
         "qwen3-coder-next-8bit",
         "qwen3-coder-next-80b-8bit"
       ],
-      "local_dir": "models/Qwen3-Coder-Next-8bit",
       "estimated_size_gb": 84.7,
-      "role": "Primary everyday coding and security model",
-      "notes": "Primary opencode, coding, and defensive cybersecurity review model; exposed through a workspace symlink to the Hugging Face cache. Keep context modest to control unified-memory pressure."
+      "role": "Large coding and security comparison model",
+      "notes": "Large local opencode, coding, and defensive cybersecurity review model. Keep context modest to control unified-memory pressure."
     },
     "qwen3_coder_30b_a3b_instruct_8bit": {
       "repo_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit",
@@ -30,10 +28,9 @@
         "qwen3-coder-30b",
         "qwen3-coder-30b-a3b"
       ],
-      "local_dir": "models/Qwen3-Coder-30B-A3B-Instruct-8bit",
       "estimated_size_gb": 32.5,
-      "role": "Coding comparison model",
-      "notes": "Downloaded 8-bit Qwen3 Coder 30B A3B instruct model for local coding and opencode testing."
+      "role": "Primary everyday coding and security model",
+      "notes": "Primary opencode, coding, and defensive cybersecurity review model."
     },
     "qwen3_next_80b_a3b_instruct_8bit": {
       "repo_id": "mlx-community/Qwen3-Next-80B-A3B-Instruct-8bit",
@@ -42,17 +39,15 @@
         "qwen3-next-80b",
         "qwen3-next-80b-a3b"
       ],
-      "local_dir": "models/Qwen3-Next-80B-A3B-Instruct-8bit",
       "estimated_size_gb": 84.7,
       "role": "Large MoE instruction comparison",
-      "notes": "Downloaded 8-bit Qwen3 Next 80B A3B instruct model for large local MoE testing; keep context modest to control unified-memory pressure."
+      "notes": "Large 8-bit Qwen3 Next 80B A3B instruct model for local MoE testing; keep context modest to control unified-memory pressure."
     },
     "gemma_4_31b_it_optiq_4bit": {
       "repo_id": "mlx-community/gemma-4-31B-it-OptiQ-4bit",
       "aliases": [
         "gemma-4-31b-it-optiq"
       ],
-      "local_dir": "models/gemma-4-31B-it-OptiQ-4bit",
       "estimated_size_gb": 23.6,
       "role": "Multimodal threat-modeling specialist",
       "notes": "Gemma 4 conditional-generation model with vision config; retain for diagram/image analysis and threat modeling even though text-only benchmark output is slower and may expose thinking-style text."
@@ -63,10 +58,9 @@
         "gemma-4-12b-coder-8bit",
         "gemma-4-12b-coder"
       ],
-      "local_dir": "models/Gemma-4-12B-Coder-Fable5-Composer2.5-8bit",
       "estimated_size_gb": 12.7,
       "role": "Experimental lightweight Python coding specialist",
-      "notes": "Execution-trained Gemma 4 coding fine-tune. Enabled as an experimental opencode tool agent; validate edits carefully because broader software-engineering, safety, and multi-step tool behavior remain under evaluation. The downloaded config currently requires model_type gemma4 for mlx-lm 0.31.3 compatibility."
+      "notes": "Execution-trained Gemma 4 coding fine-tune. Treat as an experimental opencode tool agent and validate edits carefully because broader software-engineering, safety, and multi-step tool behavior remain under evaluation."
     },
     "qwen3_6_27b_obliterated_mlx_4bit": {
       "repo_id": "edward-lcl/Qwen3.6-27B-OBLITERATED-MLX-4bit",
@@ -74,27 +68,46 @@
         "qwen3-6-27b-obliterated",
         "qwen3.6-27b-obliterated"
       ],
-      "local_dir": "models/Qwen3.6-27B-OBLITERATED-MLX-4bit",
       "estimated_size_gb": 15.1,
       "role": "Long-context Qwen3.6 comparison",
       "notes": "Experimental 27B 4-bit MLX model with a large advertised context window."
+    },
+    "ravenx_cyberagent_qwen3_6_35b_a3b_mlx": {
+      "repo_id": "deadbydawn101/RavenX-CyberAgent-Qwen3.6-35B-A3B-Opus-4.7-OpenMythos-Pentester-BugHunter-RATH-mlx",
+      "aliases": [
+        "ravenx-cyberagent",
+        "ravenx-qwen3.6-35b",
+        "ravenx-rath"
+      ],
+      "estimated_size_gb": 69.3,
+      "role": "Experimental cybersecurity chat comparison",
+      "notes": "Security-focused Qwen3.6 35B-A3B MoE MLX fine-tune with a large advertised context window. Its first OpenCode tool-agent test repeated hundreds of read calls, so keep it chat-only until bounded tool behavior passes. Independently validate findings and generated commands before acting on them."
+    },
+    "openclaw_qwen3_5_2b_classifier": {
+      "repo_id": "NeelkanthSingh/openclaw-qwen3.5-2b-classifier",
+      "aliases": [
+        "openclaw-classifier",
+        "qwen3.5-2b-classifier",
+        "question-router"
+      ],
+      "estimated_size_gb": 1.1,
+      "role": "Question-complexity routing classifier",
+      "notes": "Specialized 4-bit MLX fine-tune for classifying questions as simple, tricky, or complex and returning JSON routing metadata. Use the model-card classifier system prompt; do not treat it as a general chat, coding, or tool-use model."
     },
     "deepseek_r1_distill_qwen_32b_4bit": {
       "repo_id": "mlx-community/DeepSeek-R1-Distill-Qwen-32B-4bit",
       "aliases": [
         "deepseek-r1-qwen-32b"
       ],
-      "local_dir": "models/DeepSeek-R1-Distill-Qwen-32B-4bit",
       "estimated_size_gb": 17.0,
       "role": "Reasoning comparison",
-      "notes": "Downloaded 4-bit DeepSeek R1 distilled Qwen model."
+      "notes": "4-bit DeepSeek R1 distilled Qwen reasoning model."
     },
     "deepseek_r1_distill_qwen_32b_8bit": {
       "repo_id": "mlx-community/DeepSeek-R1-Distill-Qwen-32B-MLX-8Bit",
       "aliases": [
         "deepseek-r1-qwen-32b-8bit"
       ],
-      "local_dir": "models/DeepSeek-R1-Distill-Qwen-32B-MLX-8Bit",
       "estimated_size_gb": 34.8,
       "role": "Reasoning comparison",
       "notes": "Distilled DeepSeek reasoning target; full DeepSeek-R1 is excluded from v1."
@@ -117,7 +130,8 @@
       "qwen3_coder_30b_a3b_instruct_8bit",
       "qwen3_next_80b_a3b_instruct_8bit",
       "deepseek_r1_distill_qwen_32b_8bit",
-      "gemma_4_31b_it_optiq_4bit"
+      "gemma_4_31b_it_optiq_4bit",
+      "ravenx_cyberagent_qwen3_6_35b_a3b_mlx"
     ]
   }
 }

@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export OPENCODE_CONFIG="$ROOT_DIR/opencode.jsonc"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+if [[ -x "$PYTHON_BIN" ]]; then
+  MLX_MODEL_API_KEY="$("$PYTHON_BIN" -m mlx_lab.cli api-key --if-configured)"
+else
+  MLX_MODEL_API_KEY="$(uv run python -m mlx_lab.cli api-key --if-configured)"
+fi
+export MLX_MODEL_API_KEY="${MLX_MODEL_API_KEY:-local-mlx}"
+
 usage() {
   cat <<'EOF'
 Usage: scripts/opencode-mlx <target> [opencode args...]
 
 Targets:
-  primary         Qwen3 Coder Next 8-bit as the normal opencode Build/tool agent
+  primary         Qwen3 Coder 30B 8-bit as the normal opencode Build/tool agent
   qwen            Qwen Coder Next 4-bit as the fast fallback Build/tool agent
   qwen-chat       Qwen Coder Next 4-bit as chat-only
   qwen30          Qwen3 Coder 30B 8-bit as the normal opencode Build/tool agent
@@ -19,6 +29,7 @@ Targets:
   deepseek        DeepSeek R1 Distill Qwen 32B 4-bit as chat-only
   deepseek8       DeepSeek R1 Distill Qwen 32B 8-bit as chat-only
   qwen-oblit      Qwen3.6 27B Obliterated as chat-only
+  ravenx          RavenX CyberAgent Qwen3.6 35B A3B as chat-only
   models          List configured MLX models
 
 Examples:
@@ -27,6 +38,7 @@ Examples:
   scripts/opencode-mlx qwen30
   scripts/opencode-mlx qwen-coder-next8
   scripts/opencode-mlx qwen-next80
+  scripts/opencode-mlx ravenx
   scripts/opencode-mlx deepseek --continue
 EOF
 }
@@ -41,7 +53,7 @@ shift
 
 case "$target" in
   primary)
-    exec opencode -m local-mlx/qwen3-coder-next-8bit "$@"
+    exec opencode -m local-mlx/qwen3-coder-30b-8bit "$@"
     ;;
   gemma|gemma-chat)
     exec opencode --agent gemma-chat "$@"
@@ -78,6 +90,9 @@ case "$target" in
     ;;
   qwen-oblit|qwen-oblit-chat)
     exec opencode --agent qwen-oblit-chat "$@"
+    ;;
+  ravenx|ravenx-chat|ravenx-cyberagent|ravenx-rath)
+    exec opencode --agent ravenx-chat "$@"
     ;;
   models|list)
     exec "$(dirname "$0")/mlx-server" models

@@ -2,8 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_PATH="$ROOT_DIR/configs/models.json"
-DEFAULT_MODEL_ALIAS="qwen3_coder_next_8bit"
+PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+
+run_mlx_lab() {
+  if [[ -x "$PYTHON_BIN" ]]; then
+    "$PYTHON_BIN" -m mlx_lab.cli "$@"
+    return
+  fi
+  uv run python -m mlx_lab.cli "$@"
+}
+
+DEFAULT_MODEL_ALIAS="qwen3_coder_30b_a3b_instruct_8bit"
 MODEL_INPUT="${MLX_SERVER_MODEL:-$DEFAULT_MODEL_ALIAS}"
 COMMAND="${1:-}"
 if [[ $# -ge 2 ]]; then
@@ -16,53 +25,24 @@ fi
 HOST="${MLX_SERVER_HOST:-127.0.0.1}"
 PORT="${MLX_SERVER_PORT:-48080}"
 START_TIMEOUT="${MLX_SERVER_START_TIMEOUT:-300}"
-LOG_DIR="$ROOT_DIR/logs"
+LOG_DIR="$(run_mlx_lab path logs)"
 PID_FILE="$LOG_DIR/mlx-server.pid"
 LOG_FILE="$LOG_DIR/mlx-server.log"
 RUNTIME_STATE_FILE="${MLX_SERVER_RUNTIME_STATE:-$LOG_DIR/mlx-server-runtime.json}"
 SERVER_URL="http://$HOST:$PORT/v1/models"
-PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 SERVER_MODULE="mlx_lab.mlx_server"
 PROMPT_CACHE_SIZE="${MLX_SERVER_PROMPT_CACHE_SIZE:-4}"
 PROMPT_CACHE_BYTES="${MLX_SERVER_PROMPT_CACHE_BYTES:-8GB}"
 export MLX_SERVER_RUNTIME_STATE="$RUNTIME_STATE_FILE"
 export MLX_SERVER_PIN_MODEL="${MLX_SERVER_PIN_MODEL:-1}"
+MODEL_API_KEY="$(run_mlx_lab api-key --if-configured)"
+CURL_AUTH_ARGS=()
+if [[ -n "$MODEL_API_KEY" ]]; then
+  CURL_AUTH_ARGS=(-H "Authorization: Bearer $MODEL_API_KEY")
+fi
 
 resolve_model_ref() {
-  python3 - "$ROOT_DIR" "$CONFIG_PATH" "$MODEL_INPUT" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-config_path = Path(sys.argv[2])
-model_input = sys.argv[3]
-
-if model_input.startswith("/"):
-    print(model_input)
-    raise SystemExit
-
-if model_input.startswith("models/"):
-    print(root / model_input)
-    raise SystemExit
-
-with config_path.open("r", encoding="utf-8") as file:
-    config = json.load(file)
-
-models = config.get("models", {})
-for key, model in models.items():
-    candidates = {key, Path(model["local_dir"]).name, model["repo_id"]}
-    candidates.update(model.get("aliases", []))
-    if model_input in candidates:
-        local = root / model["local_dir"]
-        if (local / "config.json").exists() and any(local.glob("*.safetensors")):
-            print(local)
-        else:
-            print(model["repo_id"])
-        raise SystemExit
-
-print(model_input)
-PY
+  run_mlx_lab resolve-model "$MODEL_INPUT"
 }
 
 MODEL_REF="$(resolve_model_ref)"
@@ -89,7 +69,8 @@ Commands:
   list        Alias for models
 
 Environment:
-  MLX_SERVER_MODEL Default: qwen3_coder_next_8bit
+  MLX_SERVER_MODEL Default: qwen3_coder_30b_a3b_instruct_8bit
+  MLX_LAB_HOME      Override the per-user config, model, run, and log store
   MLX_SERVER_HOST  Default: 127.0.0.1
   MLX_SERVER_PORT  Default: 48080
   MLX_SERVER_MODEL_LIST configured|runtime (default: configured)
@@ -100,8 +81,14 @@ Environment:
   MLX_SERVER_MEMORY_GUARD 1 enables admission and emergency cancellation (default)
   MLX_SERVER_MAX_CONTEXT_TOKENS Combined prompt/output context cap (default: 128000)
   MLX_SERVER_MAX_OUTPUT_TOKENS Per-request output cap (default: 32000)
-  MLX_SERVER_MEMORY_RESERVE_BYTES Admission memory reserve (default: 16GB)
-  MLX_SERVER_MEMORY_ABORT_BYTES Emergency cancellation threshold (default: 8GB)
+  MLX_SERVER_REPETITION_GUARD 1 stops exact repeated token cycles (default)
+  MLX_SERVER_REPETITION_MIN_TOKENS Tokens generated before detection (default: 96)
+  MLX_SERVER_REPETITION_WINDOW_TOKENS Minimum repeated suffix (default: 64)
+  MLX_SERVER_REPETITION_MIN_REPEATS Exact cycle count required (default: 4)
+  MLX_SERVER_REPETITION_MAX_PATTERN_TOKENS Longest cycle checked (default: 128)
+  MLX_SERVER_MEMORY_RESERVE_BYTES Admission reserve override (adaptive 4-16GiB)
+  MLX_SERVER_MEMORY_ABORT_BYTES Emergency threshold override (half the reserve)
+  The shared API key is managed in Control Center or printed by mlx-lab api-key.
 EOF
 }
 
@@ -118,7 +105,7 @@ is_pid_running() {
 }
 
 is_http_ready() {
-  curl -fsS "$SERVER_URL" >/dev/null 2>&1
+  curl -fsS "${CURL_AUTH_ARGS[@]}" "$SERVER_URL" >/dev/null 2>&1
 }
 
 listener_pids() {
@@ -397,6 +384,7 @@ PY
 
 test_server() {
   curl -fsS "http://$HOST:$PORT/v1/chat/completions" \
+    "${CURL_AUTH_ARGS[@]}" \
     -H "Content-Type: application/json" \
     -d '{
       "model": "'$MODEL_REF'",
@@ -410,25 +398,7 @@ test_server() {
 }
 
 list_models() {
-  python3 - "$ROOT_DIR" "$CONFIG_PATH" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-config_path = Path(sys.argv[2])
-
-with config_path.open("r", encoding="utf-8") as file:
-    config = json.load(file)
-
-for key, model in config.get("models", {}).items():
-    local = root / model["local_dir"]
-    downloaded = (local / "config.json").exists() and any(local.glob("*.safetensors"))
-    aliases = ", ".join(model.get("aliases", [])) or "-"
-    ref = str(local) if downloaded else model["repo_id"]
-    status = "local" if downloaded else "hosted"
-    print(f"{key}\t{status}\t{aliases}\t{ref}")
-PY
+  run_mlx_lab models --plain
 }
 
 case "${1:-}" in

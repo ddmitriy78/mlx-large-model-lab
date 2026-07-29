@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.parse
+from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +17,70 @@ import psutil
 from mlx_lm import server as mlx_server
 
 from .cli import configured_models, model_is_downloaded, model_label, model_path
+from .model_sizing import (
+    GIB,
+    model_memory_profile,
+    recommended_abort_threshold_bytes,
+    recommended_memory_reserve_bytes,
+)
+from .telemetry import TelemetryStore, mcp_server_for_tool
+from .user_store import control_center_settings, sync_user_store, user_paths
 
 
 TRUTHY = {"1", "true", "yes", "on", "all"}
 RUNTIME_STATE_LOCK = threading.Lock()
 PROMPT_CACHE_MAX_BYTES: int | None = None
-GIB = 1 << 30
+WHITESPACE_RE = re.compile(r"\s+")
+MODEL_API_ACCESS: dict[str, Any] = {"authentication": "none"}
+
+
+class TokenRepetitionGuard:
+    """Detect exact repeated token cycles after enough generated output."""
+
+    def __init__(
+        self,
+        *,
+        min_generated_tokens: int = 96,
+        min_repeated_tokens: int = 64,
+        min_repeats: int = 4,
+        max_pattern_tokens: int = 128,
+    ) -> None:
+        self.min_generated_tokens = max(1, min_generated_tokens)
+        self.min_repeated_tokens = max(1, min_repeated_tokens)
+        self.min_repeats = max(2, min_repeats)
+        self.max_pattern_tokens = max(1, max_pattern_tokens)
+        retained = max(
+            self.min_generated_tokens,
+            self.min_repeated_tokens + self.max_pattern_tokens,
+            self.min_repeats * self.max_pattern_tokens,
+        )
+        self.tokens: deque[int] = deque(maxlen=retained)
+        self.generated_tokens = 0
+
+    def observe(self, token: int) -> tuple[int, int] | None:
+        self.tokens.append(int(token))
+        self.generated_tokens += 1
+        if self.generated_tokens < self.min_generated_tokens:
+            return None
+
+        tokens = list(self.tokens)
+        max_pattern = min(
+            self.max_pattern_tokens,
+            len(tokens) // self.min_repeats,
+        )
+        for pattern_tokens in range(1, max_pattern + 1):
+            repeats = max(
+                self.min_repeats,
+                (self.min_repeated_tokens + pattern_tokens - 1)
+                // pattern_tokens,
+            )
+            repeated_tokens = pattern_tokens * repeats
+            if len(tokens) < repeated_tokens:
+                continue
+            pattern = tokens[-pattern_tokens:]
+            if tokens[-repeated_tokens:] == pattern * repeats:
+                return pattern_tokens, repeats
+        return None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -38,51 +100,157 @@ def _env_size(name: str, default: str) -> int:
         return int(mlx_server._parse_size(default))
 
 
-def _model_config(model_ref: Any) -> dict[str, Any]:
-    path = Path(str(model_ref or "")).expanduser()
-    if not path.is_dir():
-        return {}
-    try:
-        config = json.loads((path / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-    if not isinstance(config, dict):
-        return {}
-    text_config = config.get("text_config")
-    if isinstance(text_config, dict):
-        return {**config, **text_config}
-    return config
+def _model_api_access_snapshot() -> dict[str, Any]:
+    settings = control_center_settings()
+    access = {
+        "authentication": settings["model_api_authentication"],
+    }
+    if access["authentication"] == "api_key":
+        access["api_key"] = control_center_settings(include_secret=True)["api_key"]
+    return access
+
+
+def valid_model_api_key(
+    candidate: str,
+    access: dict[str, Any] | None = None,
+) -> bool:
+    active_access = access or MODEL_API_ACCESS
+    if active_access.get("authentication") != "api_key":
+        return True
+    secret = str(active_access.get("api_key") or "")
+    return bool(candidate) and bool(secret) and hmac.compare_digest(candidate, secret)
+
+
+def _telemetry_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _telemetry_tool_name(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    function = tool.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "")[:160]
+    return str(tool.get("name") or "")[:160]
+
+
+def _telemetry_client(handler: Any) -> str:
+    explicit = str(handler.headers.get("X-MLX-Client") or "").strip()
+    if explicit:
+        return explicit[:80]
+    user_agent = str(handler.headers.get("User-Agent") or "").strip()
+    lower_agent = user_agent.casefold()
+    if "opencode" in lower_agent:
+        return "OpenCode"
+    if "curl" in lower_agent:
+        return "curl"
+    if "python" in lower_agent:
+        return "Python client"
+    if "mozilla" in lower_agent:
+        return "Browser client"
+    return user_agent[:80] or "Unknown client"
+
+
+def _telemetry_request_record(
+    handler: Any,
+    request: Any,
+    request_id: str,
+) -> dict[str, Any]:
+    request_type = str(getattr(request, "request_type", "unknown"))
+    messages = getattr(request, "messages", []) or []
+    tools = getattr(request, "tools", []) or []
+    input_texts: list[str] = []
+    query = ""
+    tool_results = 0
+
+    if request_type == "chat" and isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            text = _telemetry_text(message.get("content"))
+            if text:
+                input_texts.append(text)
+            if message.get("role") == "user" and text:
+                query = text
+            if message.get("role") == "tool":
+                tool_results += 1
+    else:
+        query = _telemetry_text(getattr(request, "prompt", ""))
+        if query:
+            input_texts.append(query)
+
+    offered_tools = [
+        name for name in (_telemetry_tool_name(tool) for tool in tools) if name
+    ]
+    preview_enabled = os.environ.get(
+        "MLX_SERVER_TELEMETRY_QUERY_PREVIEW",
+        "1",
+    ).strip().lower() in TRUTHY
+    preview_limit = max(
+        0,
+        min(_env_int("MLX_SERVER_TELEMETRY_PREVIEW_CHARS", 240), 2_000),
+    )
+    query_preview = (
+        WHITESPACE_RE.sub(" ", query).strip()[:preview_limit]
+        if preview_enabled and preview_limit
+        else ""
+    )
+    model = str(SAFETY.model_profile.get("model") or handler.requested_model)
+    client_address = getattr(handler, "client_address", ("", 0))
+    return {
+        "id": request_id,
+        "started_at": time.time(),
+        "status": "active",
+        "request_type": request_type,
+        "endpoint": str(getattr(handler, "path", "")),
+        "model": model,
+        "client": _telemetry_client(handler),
+        "client_address": str(client_address[0] if client_address else ""),
+        "stream": bool(getattr(handler, "stream", False)),
+        "message_count": len(messages) if isinstance(messages, list) else 0,
+        "input_characters": sum(len(text) for text in input_texts),
+        "query_preview": query_preview,
+        "max_output_tokens": int(getattr(handler, "max_tokens", 0) or 0),
+        "prompt_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "output_tokens": 0,
+        "offered_tools": offered_tools,
+        "offered_tool_count": len(offered_tools),
+        "mcp_servers": sorted(
+            {
+                server
+                for server in (mcp_server_for_tool(name) for name in offered_tools)
+                if server
+            }
+        ),
+        "tool_results": tool_results,
+        "tool_calls": [],
+        "tool_call_count": 0,
+        "mcp_tool_call_count": 0,
+    }
 
 
 def _model_safety_profile(model_ref: Any) -> dict[str, Any]:
-    config = _model_config(model_ref)
-    layers = int(config.get("num_hidden_layers") or 0)
-    kv_heads = int(
-        config.get("num_key_value_heads")
-        or config.get("num_attention_heads")
-        or 0
-    )
-    head_dim = int(config.get("head_dim") or 0)
-    if not head_dim:
-        hidden_size = int(config.get("hidden_size") or 0)
-        attention_heads = int(config.get("num_attention_heads") or 0)
-        head_dim = hidden_size // attention_heads if attention_heads else 0
-
-    # MLX prompt caches normally keep float16/bfloat16 K and V arrays.
-    kv_bytes_per_token = (
-        2 * layers * kv_heads * head_dim * 2
-        if layers and kv_heads and head_dim
-        else _env_size("MLX_SERVER_KV_BYTES_PER_TOKEN", "131072")
-    )
-    return {
-        "model": _canonical_model_ref(model_ref),
-        "model_context_tokens": int(
-            config.get("max_position_embeddings")
-            or config.get("model_max_length")
-            or 0
+    profile = model_memory_profile(
+        str(model_ref or ""),
+        fallback_kv_bytes_per_token=_env_size(
+            "MLX_SERVER_KV_BYTES_PER_TOKEN",
+            "131072",
         ),
-        "kv_bytes_per_token": kv_bytes_per_token,
-    }
+    )
+    profile["model"] = _canonical_model_ref(model_ref)
+    return profile
 
 
 class SafetyController:
@@ -96,6 +264,17 @@ class SafetyController:
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
+        recommended_reserve = recommended_memory_reserve_bytes(
+            int(psutil.virtual_memory().total)
+        )
+        memory_reserve = _env_size(
+            "MLX_SERVER_MEMORY_RESERVE_BYTES",
+            str(recommended_reserve),
+        )
+        memory_abort = _env_size(
+            "MLX_SERVER_MEMORY_ABORT_BYTES",
+            str(recommended_abort_threshold_bytes(memory_reserve)),
+        )
         self.policy: dict[str, Any] = {
             "enabled": os.environ.get(
                 "MLX_SERVER_MEMORY_GUARD", "1"
@@ -107,12 +286,8 @@ class SafetyController:
             "max_output_tokens": _env_int(
                 "MLX_SERVER_MAX_OUTPUT_TOKENS", 32_000
             ),
-            "memory_reserve_bytes": _env_size(
-                "MLX_SERVER_MEMORY_RESERVE_BYTES", str(16 * GIB)
-            ),
-            "memory_abort_bytes": _env_size(
-                "MLX_SERVER_MEMORY_ABORT_BYTES", str(8 * GIB)
-            ),
+            "memory_reserve_bytes": memory_reserve,
+            "memory_abort_bytes": memory_abort,
         }
         self.model_profile: dict[str, Any] = {
             "model": "",
@@ -201,11 +376,13 @@ class SafetyController:
                 "started_at": now,
                 "prompt_tokens": 0,
                 "prompt_processed": 0,
+                "cached_prompt_tokens": 0,
                 "output_tokens": 0,
                 "max_output_tokens": int(args.max_tokens),
                 "estimated_kv_bytes": 0,
                 "cancel_requested": False,
                 "cancel_reason": "",
+                "error": "",
             }
         self.publish()
 
@@ -280,6 +457,13 @@ class SafetyController:
             if tracked is None:
                 return
             tracked["context"] = context
+            runtime_model = str(self.model_profile.get("model") or "")
+            if runtime_model:
+                tracked["model"] = runtime_model
+            tracked["cached_prompt_tokens"] = max(
+                0,
+                int(getattr(context, "prompt_cache_count", 0) or 0),
+            )
             if tracked["cancel_requested"]:
                 context.stop()
                 response_queue = tracked["response_queue"]
@@ -310,6 +494,7 @@ class SafetyController:
             tracked = self.requests.get(request_id)
             if tracked is not None:
                 tracked["status"] = "rejected"
+                tracked["error"] = str(error)
             self.last_event = {
                 "type": "request_error",
                 "message": str(error),
@@ -335,13 +520,22 @@ class SafetyController:
             request = tracked.get("request")
             if request is not None:
                 self.request_ids.pop(id(request), None)
-            if not tracked["cancel_requested"]:
+            if not tracked["cancel_requested"] and tracked["status"] != "rejected":
                 self.last_event = {
                     "type": "request_completed",
                     "message": f"Request {request_id} completed.",
                     "at": time.time(),
                 }
         self.publish()
+
+    def request_snapshot(self, request_id: str) -> dict[str, Any]:
+        with self.lock:
+            tracked = self.requests.get(request_id) or {}
+            return {
+                key: value
+                for key, value in tracked.items()
+                if key not in {"request", "response_queue", "context"}
+            }
 
     def cancel(self, request_id: str | None, reason: str) -> list[str]:
         cancelled: list[str] = []
@@ -422,13 +616,16 @@ class SafetyController:
 
 
 SAFETY = SafetyController()
+TELEMETRY = TelemetryStore(
+    max_history=_env_int("MLX_SERVER_TELEMETRY_MAX_RECORDS", 5_000)
+)
 
 
 def _runtime_state_path() -> Path:
     configured = os.environ.get("MLX_SERVER_RUNTIME_STATE", "")
     if configured:
         return Path(configured).expanduser()
-    return Path.cwd() / "logs" / "mlx-server-runtime.json"
+    return user_paths().logs / "mlx-server-runtime.json"
 
 
 def _write_runtime_state(**updates: Any) -> None:
@@ -712,6 +909,7 @@ def _patch_generation_safety() -> None:
     original_stop_and_join = mlx_server.ResponseGenerator.stop_and_join
     original_tokenize = mlx_server.ResponseGenerator._tokenize
     original_handle_completion = mlx_server.APIHandler.handle_completion
+    original_generate_response = mlx_server.APIHandler.generate_response
 
     def monitor_memory(self) -> None:
         while not self._stop:
@@ -782,6 +980,31 @@ def _patch_generation_safety() -> None:
         )
         SAFETY.register(request_id, request, generation_args, response_queue)
         self.requests.put((response_queue, request, generation_args))
+        repetition_guard = (
+            TokenRepetitionGuard(
+                min_generated_tokens=max(
+                    1,
+                    _env_int("MLX_SERVER_REPETITION_MIN_TOKENS", 96),
+                ),
+                min_repeated_tokens=max(
+                    1,
+                    _env_int("MLX_SERVER_REPETITION_WINDOW_TOKENS", 64),
+                ),
+                min_repeats=max(
+                    2,
+                    _env_int("MLX_SERVER_REPETITION_MIN_REPEATS", 4),
+                ),
+                max_pattern_tokens=max(
+                    1,
+                    _env_int("MLX_SERVER_REPETITION_MAX_PATTERN_TOKENS", 128),
+                ),
+            )
+            if os.environ.get("MLX_SERVER_REPETITION_GUARD", "1")
+            .strip()
+            .lower()
+            in TRUTHY
+            else None
+        )
 
         def inner():
             while True:
@@ -797,6 +1020,23 @@ def _patch_generation_safety() -> None:
                         progress_callback(*response)
                     continue
                 SAFETY.generated_token(request_id)
+                match = (
+                    repetition_guard.observe(response.token)
+                    if repetition_guard is not None
+                    else None
+                )
+                if match is not None:
+                    pattern_tokens, repeats = match
+                    SAFETY.cancel(
+                        request_id,
+                        (
+                            "Repetition guard stopped generation after an exact "
+                            f"{pattern_tokens}-token pattern repeated {repeats} "
+                            "times."
+                        ),
+                    )
+                    yield replace(response, finish_reason="stop")
+                    return
                 yield response
 
         context = response_queue.get()
@@ -804,15 +1044,49 @@ def _patch_generation_safety() -> None:
             SAFETY.mark_error(request_id, context)
             raise context
         SAFETY.attach_context(request_id, context)
+        request_state = SAFETY.request_snapshot(request_id)
+        TELEMETRY.update(
+            request_id,
+            model=str(
+                request_state.get("model")
+                or generation_args.model.model
+            ),
+            cached_prompt_tokens=max(
+                0,
+                int(getattr(context, "prompt_cache_count", 0) or 0),
+            ),
+        )
         return context, mlx_server._process_control_tokens(context, inner())
+
+    def patched_generate_response(self, *args, **kwargs):
+        response = original_generate_response(self, *args, **kwargs)
+        request_id = str(getattr(self, "request_id", ""))
+        if request_id:
+            request_state = SAFETY.request_snapshot(request_id)
+            cancel_reason = str(request_state.get("cancel_reason") or "")
+            if cancel_reason.startswith("Repetition guard stopped"):
+                response["mlx_stop_reason"] = "repetition"
+                response["mlx_stop_message"] = cancel_reason
+            TELEMETRY.record_response(request_id, response)
+        return response
 
     def patched_handle_completion(self, request, stop_words):
         request_id = str(getattr(self, "request_id", "") or f"mlx-{time.time_ns()}")
         previous_request_id = getattr(REQUEST_LOCAL, "request_id", None)
         REQUEST_LOCAL.request_id = request_id
+        TELEMETRY.start(_telemetry_request_record(self, request, request_id))
+        request_error: Exception | None = None
         try:
             return original_handle_completion(self, request, stop_words)
+        except Exception as exc:
+            request_error = exc
+            raise
         finally:
+            request_state = SAFETY.request_snapshot(request_id)
+            if request_error is not None and request_state.get("status") != "rejected":
+                request_state["status"] = "rejected"
+                request_state["error"] = str(request_error)
+            TELEMETRY.finish(request_id, request_state=request_state)
             SAFETY.finish(request_id)
             if previous_request_id is None:
                 try:
@@ -827,6 +1101,7 @@ def _patch_generation_safety() -> None:
     mlx_server.ResponseGenerator._tokenize = patched_tokenize
     mlx_server.ResponseGenerator.generate = patched_generate
     mlx_server.ResponseGenerator._mlx_lab_safety_patched = True
+    mlx_server.APIHandler.generate_response = patched_generate_response
     mlx_server.APIHandler.handle_completion = patched_handle_completion
 
 
@@ -855,12 +1130,65 @@ def _patch_control_endpoints() -> None:
 
     def patched_do_get(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/mlx-lab/telemetry":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                window_seconds = int(query.get("window_seconds", ["86400"])[0])
+                limit = int(query.get("limit", ["100"])[0])
+                request_page = int(query.get("request_page", ["1"])[0])
+                request_page_size = int(
+                    query.get("request_page_size", [str(min(limit, 100))])[0]
+                )
+                if not 0 <= window_seconds <= 31_536_000:
+                    raise ValueError(
+                        "window_seconds must be between 0 and 31536000."
+                    )
+                if not 1 <= limit <= 500:
+                    raise ValueError("limit must be between 1 and 500.")
+                if not 1 <= request_page <= 1_000_000:
+                    raise ValueError("request_page must be between 1 and 1000000.")
+                if not 1 <= request_page_size <= 100:
+                    raise ValueError("request_page_size must be between 1 and 100.")
+            except (TypeError, ValueError) as exc:
+                send_json(self, {"error": str(exc)}, status=400)
+                return
+            for request_state in SAFETY.snapshot().get("active_requests", []):
+                TELEMETRY.update(
+                    str(request_state.get("id") or ""),
+                    status=str(request_state.get("status") or "active"),
+                    model=str(request_state.get("model") or ""),
+                    prompt_tokens=int(request_state.get("prompt_tokens") or 0),
+                    cached_prompt_tokens=int(
+                        request_state.get("cached_prompt_tokens") or 0
+                    ),
+                    output_tokens=int(request_state.get("output_tokens") or 0),
+                )
+            send_json(
+                self,
+                TELEMETRY.snapshot(
+                    window_seconds=window_seconds,
+                    limit=limit,
+                    request_page=request_page,
+                    request_page_size=request_page_size,
+                ),
+            )
+            return
         if parsed.path == "/mlx-lab/status":
             send_json(
                 self,
                 {
                     "ok": True,
+                    "authentication": {
+                        "required": (
+                            MODEL_API_ACCESS.get("authentication") == "api_key"
+                        ),
+                        "scheme": "bearer",
+                        "shared_with_control_center": True,
+                    },
                     "safety": SAFETY.snapshot(),
+                    "telemetry": {
+                        "active": TELEMETRY.active_snapshot(),
+                    },
                     "prompt_cache": _cache_state(
                         self.response_generator.prompt_cache
                     ),
@@ -930,6 +1258,53 @@ def _patch_control_endpoints() -> None:
     mlx_server.APIHandler._mlx_lab_control_patched = True
 
 
+def _patch_api_key_authentication(access: dict[str, Any]) -> None:
+    if getattr(mlx_server.APIHandler, "_mlx_lab_auth_patched", False):
+        return
+
+    original_do_get = mlx_server.APIHandler.do_GET
+    original_do_post = mlx_server.APIHandler.do_POST
+
+    def supplied_api_key(handler) -> str:
+        authorization = str(handler.headers.get("Authorization") or "")
+        scheme, _, value = authorization.partition(" ")
+        if scheme.casefold() == "bearer":
+            return value.strip()
+        return str(handler.headers.get("X-API-Key") or "").strip()
+
+    def require_authentication(handler) -> bool:
+        if valid_model_api_key(supplied_api_key(handler), access):
+            return True
+        payload = json.dumps(
+            {"error": "A valid MLX Lab API key is required."}
+        ).encode("utf-8")
+        handler._set_completion_headers(401)
+        handler.send_header(
+            "WWW-Authenticate",
+            'Bearer realm="MLX Model API"',
+        )
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.end_headers()
+        handler.wfile.write(payload)
+        handler.wfile.flush()
+        return False
+
+    def authenticated_do_get(self):
+        if require_authentication(self):
+            return original_do_get(self)
+        return None
+
+    def authenticated_do_post(self):
+        if require_authentication(self):
+            return original_do_post(self)
+        return None
+
+    mlx_server.APIHandler.do_GET = authenticated_do_get
+    mlx_server.APIHandler.do_POST = authenticated_do_post
+    mlx_server.APIHandler._mlx_lab_auth_patched = True
+
+
 def _patch_models_endpoint() -> None:
     if getattr(mlx_server.APIHandler, "_mlx_lab_patched", False):
         return
@@ -979,11 +1354,18 @@ def _patch_models_endpoint() -> None:
 
 
 def main() -> None:
+    global MODEL_API_ACCESS
+    sync_user_store()
+    MODEL_API_ACCESS = _model_api_access_snapshot()
+    _write_runtime_state(
+        model_api_authentication=MODEL_API_ACCESS["authentication"],
+    )
     _patch_model_provider()
     _patch_prompt_cache()
     _patch_generation_safety()
     _patch_models_endpoint()
     _patch_control_endpoints()
+    _patch_api_key_authentication(MODEL_API_ACCESS)
     mlx_server.main()
 
 

@@ -1,0 +1,172 @@
+## Coding Agent Benchmark Task: Secure Webhook Delivery Service
+
+Build a production-quality webhook delivery service in **Python 3.12** using **FastAPI**, **PostgreSQL**, and **Redis**.
+
+### Requirements
+
+Create these API endpoints:
+
+```text
+POST   /subscriptions
+GET    /subscriptions/{id}
+DELETE /subscriptions/{id}
+
+POST   /events
+GET    /events/{id}
+GET    /deliveries/{id}
+POST   /deliveries/{id}/retry
+```
+
+A subscription contains:
+
+```json
+{
+  "target_url": "https://customer.example.com/webhooks",
+  "secret": "customer-secret",
+  "event_types": ["invoice.created", "invoice.paid"]
+}
+```
+
+An event contains:
+
+```json
+{
+  "event_type": "invoice.created",
+  "idempotency_key": "unique-client-key",
+  "payload": {
+    "invoice_id": "inv_123",
+    "amount": 5000
+  }
+}
+```
+
+### Delivery behavior
+
+When an event is accepted:
+
+1. Find active subscriptions matching its event type.
+2. Create one delivery record per matching subscription.
+3. Deliver asynchronously.
+4. Send the webhook body as JSON.
+5. Include these headers:
+
+```text
+X-Webhook-Event-ID
+X-Webhook-Delivery-ID
+X-Webhook-Timestamp
+X-Webhook-Signature
+```
+
+Generate the signature as:
+
+```text
+hex(HMAC-SHA256(secret, timestamp + "." + raw_request_body))
+```
+
+### Reliability requirements
+
+The service must:
+
+* Prevent duplicate events using `idempotency_key`.
+* Retry failed deliveries with exponential backoff.
+* Retry no more than five times.
+* Treat HTTP `200–299` as success.
+* Use a request timeout.
+* Preserve delivery attempt history.
+* Recover queued work after a process restart.
+* Avoid delivering the same queued attempt concurrently from two workers.
+* Support manual retry without modifying historical attempts.
+
+### Security requirements
+
+The service must:
+
+* Reject subscription URLs that target loopback, private, link-local, multicast, or metadata-service addresses.
+* Protect against DNS rebinding by validating the resolved destination at delivery time.
+* Permit only `https://` targets.
+* Never return subscription secrets through the API.
+* Avoid logging secrets, signatures, or full webhook payloads.
+* Use constant-time comparison where signature verification is performed.
+* Validate request sizes and input formats.
+* Store secrets encrypted at rest.
+
+### Operational requirements
+
+Add:
+
+* Structured JSON logging.
+* Health and readiness endpoints.
+* Database migrations.
+* Docker Compose configuration.
+* Configuration through environment variables.
+* Graceful worker shutdown.
+* Basic delivery metrics.
+* A dead-letter state for permanently failed deliveries.
+
+### Testing
+
+Include automated tests for at least:
+
+* Idempotent event creation.
+* Correct signature generation.
+* Successful delivery.
+* Retry behavior.
+* Maximum retry enforcement.
+* Concurrent worker protection.
+* Manual retry.
+* URL validation.
+* DNS rebinding protection.
+* Secret redaction.
+* Recovery after worker restart.
+
+Do not use real external services in the test suite.
+
+### Deliverables
+
+The repository must contain:
+
+```text
+README.md
+docker-compose.yml
+.env.example
+application source
+database migrations
+unit tests
+integration tests
+architecture decision record
+```
+
+The README must explain:
+
+* How to run the service.
+* How to run tests.
+* The delivery state machine.
+* Retry timing.
+* Security design decisions.
+* Known limitations.
+
+## Hidden Evaluation Scenarios
+
+Tell the coding agent only that hidden tests exist. Evaluate it against cases such as:
+
+* Two simultaneous requests with the same idempotency key.
+* Redirect from a public URL to `127.0.0.1`.
+* Hostname resolving to a public address during validation and a private address during delivery.
+* Worker termination after the HTTP request but before committing success.
+* Multiple workers claiming the same delivery.
+* A target returning `429`, `500`, malformed responses, or hanging indefinitely.
+* Manual retry of an already successful delivery.
+* Secrets accidentally exposed through serialization or logs.
+
+## Scoring
+
+| Area                             | Weight |
+| -------------------------------- | -----: |
+| Functional correctness           |    25% |
+| Reliability and concurrency      |    20% |
+| Security                         |    20% |
+| Test quality                     |    15% |
+| Architecture and maintainability |    10% |
+| Documentation and operations     |    10% |
+
+This benchmark tests whether the agent can move beyond generating CRUD code and correctly handle distributed-system failure modes, concurrency, SSRF, cryptographic signing, persistence, and testability.
