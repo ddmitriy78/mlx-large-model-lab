@@ -10,6 +10,7 @@ runs/
 adapters/
 prompt-caches/
 logs/
+.private/
 *.safetensors
 
 # Local OS/editor files.
