@@ -144,10 +144,6 @@ file.
 
 ## Model server
 
-<p align="center">
-  <img src="docs/images/readme/model-fit-safety.jpg" alt="Abstract model core enclosed by unified-memory rings and an outer safety-reserve boundary." width="860">
-</p>
-
 The server helper keeps at most one explicitly loaded model resident:
 
 ```bash
